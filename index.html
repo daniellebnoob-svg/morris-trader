@@ -990,6 +990,8 @@ ${sectorStr}
 
 Wash sale lockouts (NEVER suggest selling these at a loss): ${lockStr}
 
+⚠️ WASH SALE AWARENESS: This trader has already lost $185K to wash sales. NEVER suggest buying a stock he sold in the last 30 days. NEVER suggest selling at a loss if he bought it in the last 30 days. Rotate between DIFFERENT stocks if recommending short holds.
+
 YOUR JOB:
 1. Search your knowledge for the LATEST news on his holdings AND their sector competitors as of RIGHT NOW
 2. If a competitor has news (earnings, downgrade, product launch), flag how it affects HIS holdings. Example: "TSM reports today — likely moves NVDA, AMD"
@@ -1492,7 +1494,19 @@ async function runPatternAnalysis() {
   const trades = S.trades;
   const stats = computeTradeStats(trades);
   
+  // Compute wash sale cost
+  const washSales = S.conflicts || [];
+  const washLosses = washSales.reduce((sum, w) => sum + Math.abs(w.loss || 0), 0);
+  const washTax = washSales.reduce((sum, w) => sum + (w.tax || 0), 0);
+  
   const prompt = `Analyze these 981 trades from a day trader and find patterns that make money vs lose money. This is serious money analysis - be direct, specific, actionable.
+
+⚠️ CRITICAL CONTEXT — WASH SALE PROBLEM:
+This trader has already triggered ${washSales.length} wash sales in the last 6 months.
+Total disallowed losses: $${Math.round(washLosses).toLocaleString()}
+Estimated extra tax from wash sales: $${Math.round(washTax).toLocaleString()}
+
+This means any "short hold" strategy that involves repeatedly buying and selling the same stock is EXTREMELY DANGEROUS for him — it has already cost him nearly $185K in phantom taxes. DO NOT recommend short holding patterns that repeat on the same ticker. Any short-hold win-rate advice must include the warning that doing this on the same stock creates wash sales.
 
 OVERALL STATS:
 - Total trades: ${trades.length}
@@ -1518,7 +1532,7 @@ Return ONLY valid JSON with this structure, no markdown:
 {
   "summary": "2-3 sentence overall assessment in plain English",
   "what_works": [
-    {"pattern": "Short pattern title", "detail": "Specific plain-English explanation with numbers", "impact": "money impact estimate"}
+    {"pattern": "Short pattern title", "detail": "Specific plain-English explanation with numbers. If pattern involves short holds, explicitly add: 'Rotate between DIFFERENT stocks - never rebuy the same stock within 30 days or you trigger a wash sale'", "impact": "money impact estimate", "wash_risk": false}
   ],
   "what_loses": [
     {"pattern": "Short title", "detail": "What's happening and why it loses money", "impact": "dollar amount lost"}
@@ -1530,11 +1544,19 @@ Return ONLY valid JSON with this structure, no markdown:
     "Plain sentence about habit that needs to stop"
   ],
   "profit_opportunities": [
-    "Specific ticker or strategy that historically works well"
+    "Specific ticker or strategy that historically works well - mention sectors he should watch that he does not currently own"
+  ],
+  "missed_opportunities": [
+    {"ticker": "TICKER", "what_happened": "What the stock did after he sold or did not buy", "lesson": "What pattern to watch for next time", "estimated_miss": "$ amount he could have made"}
   ]
 }
 
-Be BLUNT. This is his money. Give honest analysis. Morris is elderly and English is his second language - plain simple sentences only.`;
+RULES:
+- For ANY "what_works" pattern involving short holds (days to weeks), set wash_risk: true and explicitly explain in detail that it only works when rotating between DIFFERENT stocks, never the same one within 30 days
+- In "dangerous_habits" - the #1 habit to flag is triggering wash sales by rebuying same ticker within 30 days
+- In "missed_opportunities" - analyze his trade history for stocks he SOLD EARLY that then ran up big, or stocks he BOUGHT and LOST on that would have been profitable if held longer
+- Be BLUNT. Morris is elderly, English is second language, plain simple sentences only
+- If a best-performing ticker shows 15+ trades, flag that this volume on one stock is what creates wash sales`;
 
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -1679,10 +1701,12 @@ function renderInsights() {
   if (p.what_works?.length) {
     html += `<div class="sec-lbl">✅ What's Making Money</div>`;
     for (const w of p.what_works) {
+      const washWarn = w.wash_risk ? `<div style="margin-top:8px;padding:8px;background:rgba(220,38,38,.15);border:1px solid rgba(252,165,165,.3);border-radius:8px;font-size:11px;color:var(--red2)"><b>⚠️ WASH SALE RISK:</b> Only works when rotating between DIFFERENT stocks. Rebuying the same stock within 30 days triggers wash sale rules. You have already lost ~$185K to this mistake.</div>` : '';
       html += `<div style="background:rgba(5,150,105,.1);border:1px solid rgba(167,243,208,.25);border-radius:13px;padding:13px;margin-bottom:7px">
         <div style="font-size:14px;font-weight:800;color:var(--green2);margin-bottom:4px">${w.pattern}</div>
         <div style="font-size:13px;color:rgba(255,255,255,.85);line-height:1.5">${w.detail}</div>
         ${w.impact ? `<div style="font-size:11px;color:var(--green2);margin-top:6px;font-weight:700">💰 ${w.impact}</div>` : ''}
+        ${washWarn}
       </div>`;
     }
   }
@@ -1720,6 +1744,20 @@ function renderInsights() {
     html += `<div class="sec-lbl">💰 Profit Opportunities</div>`;
     for (const o of p.profit_opportunities) {
       html += `<div style="background:rgba(5,150,105,.08);border-left:3px solid var(--green2);border-radius:8px;padding:10px 13px;margin-bottom:6px;font-size:13px;color:rgba(255,255,255,.9)">💎 ${o}</div>`;
+    }
+  }
+  
+  if (p.missed_opportunities?.length) {
+    html += `<div class="sec-lbl">🎯 Missed Opportunities — Learn from These</div>`;
+    for (const m of p.missed_opportunities) {
+      html += `<div style="background:rgba(212,160,23,.08);border:1px solid rgba(253,230,138,.2);border-radius:13px;padding:13px;margin-bottom:7px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+          <div style="font-size:18px;font-weight:800;font-family:\'Playfair Display\',serif;color:var(--gold2)">${m.ticker}</div>
+          ${m.estimated_miss ? `<div style="font-size:12px;color:var(--warn2);font-weight:700">${m.estimated_miss}</div>` : ''}
+        </div>
+        <div style="font-size:13px;color:rgba(255,255,255,.85);margin-bottom:6px;line-height:1.5"><b>What happened:</b> ${m.what_happened}</div>
+        <div style="font-size:12px;color:var(--gold2);line-height:1.5;padding-top:6px;border-top:1px solid rgba(255,255,255,.08)"><b>📚 Lesson:</b> ${m.lesson}</div>
+      </div>`;
     }
   }
   
