@@ -281,14 +281,19 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
       </div>
     </div>
 
-    <!-- INSIGHTS TAB - Pattern Recognition -->
+    <!-- INSIGHTS TAB -->
     <div class="tab" id="tab-insights">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:9px;margin-top:4px">
-        <div class="sec-lbl" style="margin:0">Trading Patterns — What Actually Works</div>
-        <button onclick="runPatternAnalysis()" id="insights-btn" style="background:linear-gradient(135deg,var(--blue),var(--teal));border:none;color:#fff;border-radius:9px;padding:7px 13px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif">🧠 Analyze</button>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-top:4px;margin-bottom:10px">
+        <button class="mode-btn active" id="isub-opp" onclick="setInsightView('opp')" style="font-size:10px;padding:9px 4px"><span class="mi" style="font-size:15px">🎯</span>Opportunities</button>
+        <button class="mode-btn" id="isub-xray" onclick="setInsightView('xray')" style="font-size:10px;padding:9px 4px"><span class="mi" style="font-size:15px">🔬</span>X-Ray</button>
+        <button class="mode-btn" id="isub-opt" onclick="setInsightView('opt')" style="font-size:10px;padding:9px 4px"><span class="mi" style="font-size:15px">⚖️</span>Optimize</button>
+        <button class="mode-btn" id="isub-pat" onclick="setInsightView('pat')" style="font-size:10px;padding:9px 4px"><span class="mi" style="font-size:15px">🧠</span>Patterns</button>
       </div>
       <div id="insights-wrap">
-        <div class="empty"><div class="ei">💡</div>Tap Analyze to run deep pattern analysis on your 981 trades. Find what makes money and what doesn't.</div>
+        <div class="empty"><div class="ei">💡</div>Tap a category above, then Analyze.</div>
+      </div>
+      <div style="margin-top:10px">
+        <button onclick="runActiveInsightAnalysis()" id="insights-btn" style="width:100%;background:linear-gradient(135deg,var(--blue),var(--teal));border:none;color:#fff;border-radius:11px;padding:13px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif">🧠 Run Analysis</button>
       </div>
     </div>
 
@@ -1022,14 +1027,45 @@ Rules:
       headers:{"Content-Type":"application/json","x-api-key":S.cfg.apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
       body:JSON.stringify({
         model:"claude-opus-4-7",
-        max_tokens:2000,
+        max_tokens:4000,
         system: "You are a real-time market analyst. Always use the most current market information available to you. Factor in time of day, session, and recent news. Be specific with prices.",
         messages:[{role:"user",content:prompt}]
       })
     });
     const data=await res.json();
+    if (!res.ok) {
+      throw new Error(`API ${res.status}: ${data.error?.message || JSON.stringify(data).substring(0,200)}`);
+    }
     const text=data.content?.[0]?.text||"";
-    S.brief=JSON.parse(text.replace(/```json|```/g,"").trim());
+    let cleaned = text.replace(/```json|```/g,"").trim();
+    // Try to recover from truncated JSON
+    try {
+      S.brief = JSON.parse(cleaned);
+    } catch(parseErr) {
+      // Attempt to fix truncated JSON by closing brackets
+      let fixed = cleaned;
+      // Remove any trailing incomplete string/object
+      const lastBrace = fixed.lastIndexOf('}');
+      if (lastBrace > 0) {
+        // Count unclosed braces/brackets
+        let openBraces = 0, openBrackets = 0;
+        for (let i = 0; i <= lastBrace; i++) {
+          if (fixed[i] === '{') openBraces++;
+          else if (fixed[i] === '}') openBraces--;
+          else if (fixed[i] === '[') openBrackets++;
+          else if (fixed[i] === ']') openBrackets--;
+        }
+        fixed = fixed.substring(0, lastBrace + 1);
+        while (openBrackets > 0) { fixed += ']'; openBrackets--; }
+        while (openBraces > 0) { fixed += '}'; openBraces--; }
+      }
+      try {
+        S.brief = JSON.parse(fixed);
+        console.log("Recovered truncated brief JSON");
+      } catch(e2) {
+        throw new Error(`Brief response malformed: ${parseErr.message}. AI response was ${text.length} chars. Try Retry.`);
+      }
+    }
     S.briefDate=tod();
     sv("brief",S.brief); sv("briefDate",tod());
     renderBrief();
@@ -1220,6 +1256,23 @@ function importTrades(event) {
   reader.readAsText(file);
   // Reset input
   event.target.value = "";
+}
+
+function dismissConflict(key) {
+  const dismissed = ld("dismissedConflicts", []);
+  if (!dismissed.includes(key)) {
+    dismissed.push(key);
+    sv("dismissedConflicts", dismissed);
+  }
+  renderDash();
+  renderStats();
+}
+
+function clearDismissedConflicts() {
+  sv("dismissedConflicts", []);
+  renderDash();
+  renderStats();
+  alert("All dismissed conflicts restored.");
 }
 
 function updateGmailStatus() {
@@ -1494,8 +1547,29 @@ Be BLUNT. This is his money. Give honest analysis. Morris is elderly and English
       })
     });
     const data = await res.json();
+    if (!res.ok) throw new Error(`API ${res.status}: ${data.error?.message || 'unknown'}`);
     const text = data.content?.[0]?.text || '';
-    S.patterns = JSON.parse(text.replace(/```json|```/g, '').trim());
+    let cleaned = text.replace(/```json|```/g, '').trim();
+    try {
+      S.patterns = JSON.parse(cleaned);
+    } catch(parseErr) {
+      const lastBrace = cleaned.lastIndexOf('}');
+      if (lastBrace > 0) {
+        let fixed = cleaned.substring(0, lastBrace + 1);
+        let openBraces = 0, openBrackets = 0;
+        for (const c of fixed) {
+          if (c === '{') openBraces++;
+          else if (c === '}') openBraces--;
+          else if (c === '[') openBrackets++;
+          else if (c === ']') openBrackets--;
+        }
+        while (openBrackets > 0) { fixed += ']'; openBrackets--; }
+        while (openBraces > 0) { fixed += '}'; openBraces--; }
+        S.patterns = JSON.parse(fixed);
+      } else {
+        throw parseErr;
+      }
+    }
     S.patternsDate = tod();
     sv("patterns", S.patterns);
     sv("patternsDate", tod());
@@ -1679,14 +1753,23 @@ function renderDash(){
     aw.appendChild(lbl);
     // Deduplicate by ticker+sellDate
     const seen=new Set();
+    // Load dismissed conflicts
+    const dismissed = ld("dismissedConflicts", []);
+    let shownCount = 0;
     for(const c of relevantConflicts){
-      const key=c.ticker+"_"+c.sellDate;
+      const key=c.ticker+"_"+c.sellDate+"_"+c.buyDate;
       if(seen.has(key)) continue; seen.add(key);
+      if(dismissed.includes(key)) continue;
+      shownCount++;
       const isFuture = c.safe >= today;
       const el=document.createElement("div"); el.className="alert-banner";
-      el.innerHTML=`<div class="at">⚠️ ${c.ticker} — Wash Sale</div><div class="ab">Sold at a loss on ${fmt(c.sellDate)}, then bought on ${fmt(c.buyDate)} — only ${c.days} days apart. This loss cannot be deducted.</div><div class="atax"><div><div class="atl">Extra tax you may owe</div><div class="atv">$${c.tax.toLocaleString("en-US",{maximumFractionDigits:0})}</div></div><div style="font-size:11px;color:var(--muted)">@ 37% rate</div></div>${isFuture?`<div class="safe-box"><div class="sl2">✅ Safe to rebuy ${c.ticker} after:</div><div class="sv2">${fmt(c.safe)}</div></div>`:`<div class="safe-box"><div class="sl2">✅ Safe date has passed — you can rebuy ${c.ticker} now</div></div>`}`;
+      el.style.position = "relative";
+      el.innerHTML=`<button onclick="dismissConflict('${key}')" style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,.3);border:none;color:rgba(255,255,255,.7);width:24px;height:24px;border-radius:50%;cursor:pointer;font-size:14px;font-weight:700;line-height:1;display:flex;align-items:center;justify-content:center;z-index:10" title="Dismiss">×</button><div class="at">⚠️ ${c.ticker} — Wash Sale</div><div class="ab">Sold at a loss on ${fmt(c.sellDate)}, then bought on ${fmt(c.buyDate)} — only ${c.days} days apart. This loss cannot be deducted.</div><div class="atax"><div><div class="atl">Extra tax you may owe</div><div class="atv">$${c.tax.toLocaleString("en-US",{maximumFractionDigits:0})}</div></div><div style="font-size:11px;color:var(--muted)">@ 37% rate</div></div>${isFuture?`<div class="safe-box"><div class="sl2">✅ Safe to rebuy ${c.ticker} after:</div><div class="sv2">${fmt(c.safe)}</div></div>`:`<div class="safe-box"><div class="sl2">✅ Safe date has passed — you can rebuy ${c.ticker} now</div></div>`}`;
       aw.appendChild(el);
     }
+    // Update label with actual shown count
+    const firstLbl = aw.querySelector(".sec-lbl");
+    if (firstLbl) firstLbl.textContent = `⚠️ ${shownCount} Active Conflict${shownCount !== 1 ? "s" : ""}`;
   }
   const active=Object.entries(S.lockouts).filter(([,d])=>d>=tod());
   if(active.length){
@@ -2186,6 +2269,471 @@ function sw(tab){
   if (navEl) navEl.classList.add("active");
   // Scroll to top on tab change
   window.scrollTo(0,0);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+// SUPER INSIGHTS — 4 analysis modes
+// ══════════════════════════════════════════════════════════════════
+let activeInsightView = "opp";
+
+function setInsightView(view) {
+  activeInsightView = view;
+  document.querySelectorAll("[id^='isub-']").forEach(b => b.classList.remove("active"));
+  document.getElementById("isub-" + view).classList.add("active");
+  
+  // Show cached if exists
+  const cached = ld("insight_" + view, null);
+  if (cached) {
+    renderInsightView(view, cached);
+  } else {
+    const label = {opp: "Opportunities", xray: "Portfolio X-Ray", opt: "Position Optimizer", pat: "Trading Patterns"}[view];
+    document.getElementById("insights-wrap").innerHTML = `<div class="empty"><div class="ei">💡</div>Tap Run Analysis for ${label}.</div>`;
+  }
+}
+
+async function runActiveInsightAnalysis() {
+  S.cfg = ld("cfg", S.cfg);
+  if (!S.cfg.apiKey) {
+    document.getElementById("insights-wrap").innerHTML = '<div class="empty"><div class="ei">🔑</div>Add your Anthropic API key in Settings first.</div>';
+    return;
+  }
+  const view = activeInsightView;
+  if (view === "opp") return runOpportunityScanner();
+  if (view === "xray") return runPortfolioXray();
+  if (view === "opt") return runPositionOptimizer();
+  if (view === "pat") return runPatternAnalysis();
+}
+
+// ── OPPORTUNITY SCANNER ──
+async function runOpportunityScanner() {
+  const btn = document.getElementById("insights-btn");
+  btn.textContent = "⏳ Finding opportunities...";
+  btn.disabled = true;
+  document.getElementById("insights-wrap").innerHTML = '<div class="loading"><div class="ring"></div><div class="ltxt">Scanning for stocks you should consider but do not own...</div></div>';
+  
+  const stats = computeTradeStats(S.trades);
+  const pos = buildPos();
+  const currentTickers = Object.keys(pos).filter(t => pos[t].shares > 0).join(", ");
+  const winningTickers = stats.bestTickers.slice(0,10).map(t => `${t.ticker} (net +$${t.net.toLocaleString()})`).join(", ");
+  const losingTickers = stats.worstTickers.slice(0,5).map(t => `${t.ticker} (net -$${Math.abs(t.net).toLocaleString()})`).join(", ");
+  
+  const prompt = `You are a wealth-building advisor for Morris Gabbay, an active day trader. English is his second language — use SHORT plain sentences.
+
+He currently holds: ${currentTickers}
+
+His BIGGEST WINNING trades (tickers that make him money): ${winningTickers}
+
+His BIGGEST LOSING trades (avoid similar patterns): ${losingTickers}
+
+Wash sale lockouts: ${Object.keys(S.lockouts).filter(t => S.lockouts[t] >= tod()).join(", ") || "none"}
+
+YOUR JOB: Find NEW stocks he should research and potentially buy. Not stocks he already owns. Consider:
+1. Stocks in sectors where he has a PROVEN win rate
+2. Stocks currently trading at significant discounts (52-week lows, earnings gaps, etc.)
+3. Stocks with upcoming catalysts (earnings beats, product launches, FDA approvals)
+4. Avoid anything substantially similar to his big losers
+5. Factor in CURRENT market conditions as of right now
+
+Return ONLY valid JSON, no markdown:
+{
+  "strategy_summary": "1-2 sentences on the current opportunity landscape",
+  "top_opportunities": [
+    {
+      "ticker": "XYZ",
+      "name": "Full company name",
+      "sector": "Sector name",
+      "why_now": "1-2 short sentences on why this is opportunity right now",
+      "current_price": 150.25,
+      "target_price": 185.00,
+      "upside_pct": 23,
+      "confidence": "high OR medium OR speculative",
+      "catalyst": "Specific upcoming event or reason",
+      "his_fit": "Why this matches his winning patterns",
+      "suggested_position_size": "$5K-10K based on portfolio"
+    }
+  ],
+  "sectors_to_hunt": [
+    {"sector": "Semiconductors", "reason": "Why this sector is ripe", "his_edge": "His winning pattern here"}
+  ],
+  "avoid_list": [
+    {"ticker": "ABC", "reason": "Why to skip despite being hyped"}
+  ]
+}
+
+Give 5-7 top_opportunities. Be SPECIFIC with ticker symbols, real current prices, real catalysts. No vague suggestions.`;
+
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "x-api-key": S.cfg.apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true"},
+      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 4000, messages: [{role: "user", content: prompt}]})
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(`API ${res.status}: ${data.error?.message || 'unknown'}`);
+    const text = data.content?.[0]?.text || '';
+    const result = safeJSONParse(text);
+    sv("insight_opp", result);
+    renderInsightView("opp", result);
+  } catch(e) {
+    document.getElementById("insights-wrap").innerHTML = `<div class="empty"><div class="ei">⚠️</div>Analysis failed.<br><div style="font-size:12px;color:var(--red2);padding:10px;background:rgba(220,38,38,.1);border-radius:8px;margin:10px auto;max-width:400px">${e.message}</div></div>`;
+  }
+  btn.textContent = "🧠 Run Analysis";
+  btn.disabled = false;
+}
+
+// ── PORTFOLIO X-RAY ──
+async function runPortfolioXray() {
+  const btn = document.getElementById("insights-btn");
+  btn.textContent = "⏳ X-raying portfolio...";
+  btn.disabled = true;
+  document.getElementById("insights-wrap").innerHTML = '<div class="loading"><div class="ring"></div><div class="ltxt">Analyzing concentration, correlation, and sector balance...</div></div>';
+  
+  const pos = buildPos();
+  const positions = [];
+  let totalVal = 0;
+  for (const [t, h] of Object.entries(pos)) {
+    if (h.shares <= 0) continue;
+    const live = S.prices[t];
+    const price = live ? live.current : h.avg;
+    const val = h.shares * price;
+    totalVal += val;
+    positions.push({ticker: t, shares: h.shares, value: val, sector: SECTOR_MAP[t]?.sector || "Other"});
+  }
+  positions.sort((a,b) => b.value - a.value);
+  
+  const posStr = positions.map(p => `${p.ticker}: $${(p.value/1000).toFixed(1)}K (${((p.value/totalVal)*100).toFixed(1)}%) — ${p.sector}`).join("\n");
+  
+  const prompt = `Morris Gabbay has a $${(totalVal/1000000).toFixed(2)}M portfolio. Run a deep X-ray analysis.
+
+POSITIONS (sorted by value):
+${posStr}
+
+Identify risks and imbalances. Be direct — this is his wealth.
+
+Return ONLY valid JSON, no markdown:
+{
+  "health_score": "1-100 number",
+  "overall_assessment": "1-2 sentences",
+  "concentration_risks": [
+    {"issue": "What is over-concentrated", "detail": "Specific numbers", "severity": "high OR medium OR low", "fix": "What to do about it"}
+  ],
+  "sector_balance": [
+    {"sector": "Semiconductors", "exposure_pct": 35, "recommended_max": 25, "status": "over OR balanced OR under"}
+  ],
+  "correlation_warnings": [
+    {"group": "NVDA, AMD, AVGO all chip", "risk": "Move together in chip sector downturns", "reduce_to": "Keep 2 of these, exit third"}
+  ],
+  "missing_sectors": [
+    {"sector": "Healthcare", "reason": "Zero exposure creates blind spot", "suggested": "Consider UNH, LLY, or XLV ETF"}
+  ],
+  "top_3_actions": [
+    "Plain English action, specific numbers"
+  ]
+}`;
+
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "x-api-key": S.cfg.apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true"},
+      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 3000, messages: [{role: "user", content: prompt}]})
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(`API ${res.status}: ${data.error?.message || 'unknown'}`);
+    const result = safeJSONParse(data.content?.[0]?.text || '');
+    sv("insight_xray", result);
+    renderInsightView("xray", result);
+  } catch(e) {
+    document.getElementById("insights-wrap").innerHTML = `<div class="empty"><div class="ei">⚠️</div>X-Ray failed.<br><div style="font-size:12px;color:var(--red2);padding:10px;background:rgba(220,38,38,.1);border-radius:8px;margin:10px auto;max-width:400px">${e.message}</div></div>`;
+  }
+  btn.textContent = "🧠 Run Analysis";
+  btn.disabled = false;
+}
+
+// ── POSITION OPTIMIZER ──
+async function runPositionOptimizer() {
+  const btn = document.getElementById("insights-btn");
+  btn.textContent = "⏳ Rating each position...";
+  btn.disabled = true;
+  document.getElementById("insights-wrap").innerHTML = '<div class="loading"><div class="ring"></div><div class="ltxt">Rating every position: HOLD / TRIM / ADD / EXIT...</div></div>';
+  
+  const pos = buildPos();
+  const stats = computeTradeStats(S.trades);
+  const tickerStats = {};
+  for (const t of stats.bestTickers.concat(stats.worstTickers)) {
+    tickerStats[t.ticker] = t;
+  }
+  
+  const positions = [];
+  for (const [t, h] of Object.entries(pos)) {
+    if (h.shares <= 0) continue;
+    const live = S.prices[t];
+    const price = live ? live.current : h.avg;
+    const val = h.shares * price;
+    const unrealized = val - (h.shares * h.avg);
+    const unrealPct = ((price - h.avg) / h.avg) * 100;
+    const locked = S.lockouts[t] && S.lockouts[t] >= tod();
+    const histStats = tickerStats[t];
+    positions.push({
+      ticker: t, shares: h.shares, value: val,
+      avg_cost: h.avg, current_price: price,
+      unrealized: unrealized, unrealized_pct: unrealPct.toFixed(1),
+      wash_locked: locked,
+      historical_winrate: histStats?.winRate || null,
+      historical_net: histStats?.net || 0
+    });
+  }
+  positions.sort((a,b) => b.value - a.value);
+  
+  const posStr = positions.map(p => `${p.ticker}: ${p.shares} sh @ $${p.avg_cost.toFixed(2)} (now $${p.current_price.toFixed(2)}), unrealized ${p.unrealized_pct}% ($${p.unrealized.toFixed(0)}), ${p.wash_locked ? "WASH-LOCKED" : "free to sell"}, hist win rate ${p.historical_winrate || "N/A"}%`).join("\n");
+  
+  const prompt = `Rate every position in Morris's portfolio with an action. Be direct and specific.
+
+POSITIONS:
+${posStr}
+
+For EACH position, recommend: HOLD, TRIM (reduce), ADD (buy more), or EXIT (sell all).
+
+Return ONLY valid JSON, no markdown:
+{
+  "summary": "1 sentence overall",
+  "ratings": [
+    {
+      "ticker": "AAPL",
+      "action": "HOLD OR TRIM OR ADD OR EXIT",
+      "confidence": "high OR medium OR low",
+      "reason": "1-2 short sentences",
+      "specific_quantity": "How many shares to trim/add if applicable",
+      "priority": "now OR next_week OR when_convenient",
+      "wash_warning": "Include if relevant"
+    }
+  ]
+}
+
+Rate ALL ${positions.length} positions. Use the historical win rate data.`;
+
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "x-api-key": S.cfg.apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true"},
+      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 6000, messages: [{role: "user", content: prompt}]})
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(`API ${res.status}: ${data.error?.message || 'unknown'}`);
+    const result = safeJSONParse(data.content?.[0]?.text || '');
+    sv("insight_opt", result);
+    renderInsightView("opt", result);
+  } catch(e) {
+    document.getElementById("insights-wrap").innerHTML = `<div class="empty"><div class="ei">⚠️</div>Optimizer failed.<br><div style="font-size:12px;color:var(--red2);padding:10px;background:rgba(220,38,38,.1);border-radius:8px;margin:10px auto;max-width:400px">${e.message}</div></div>`;
+  }
+  btn.textContent = "🧠 Run Analysis";
+  btn.disabled = false;
+}
+
+// ── SAFE JSON PARSE WITH RECOVERY ──
+function safeJSONParse(text) {
+  let cleaned = text.replace(/```json|```/g, '').trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch(e) {
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (lastBrace > 0) {
+      let fixed = cleaned.substring(0, lastBrace + 1);
+      let openBraces = 0, openBrackets = 0;
+      for (const c of fixed) {
+        if (c === '{') openBraces++;
+        else if (c === '}') openBraces--;
+        else if (c === '[') openBrackets++;
+        else if (c === ']') openBrackets--;
+      }
+      while (openBrackets > 0) { fixed += ']'; openBrackets--; }
+      while (openBraces > 0) { fixed += '}'; openBraces--; }
+      return JSON.parse(fixed);
+    }
+    throw e;
+  }
+}
+
+// ── RENDERERS FOR EACH INSIGHT VIEW ──
+function renderInsightView(view, data) {
+  const wrap = document.getElementById("insights-wrap");
+  if (view === "opp") renderOpportunities(wrap, data);
+  else if (view === "xray") renderXray(wrap, data);
+  else if (view === "opt") renderOptimizer(wrap, data);
+  else if (view === "pat") { S.patterns = data; renderInsights(); }
+}
+
+function renderOpportunities(wrap, d) {
+  let html = `<div style="background:linear-gradient(135deg,rgba(5,150,105,.15),rgba(26,79,214,.1));border:1px solid rgba(5,150,105,.3);border-radius:15px;padding:15px 16px;margin-bottom:12px">
+    <div style="font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--green2);text-transform:uppercase;margin-bottom:8px">🎯 Opportunity Scanner</div>
+    <div style="font-size:13px;line-height:1.6">${d.strategy_summary}</div>
+  </div>`;
+  
+  if (d.top_opportunities?.length) {
+    html += `<div class="sec-lbl">💎 Top Opportunities</div>`;
+    for (const o of d.top_opportunities) {
+      const confColor = {high: "var(--green2)", medium: "var(--warn2)", speculative: "var(--red2)"}[o.confidence] || "var(--muted)";
+      html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:13px;padding:14px;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+          <div>
+            <div style="font-size:20px;font-weight:800;font-family:'Playfair Display',serif;color:var(--gold2)">${o.ticker}</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">${o.name} · ${o.sector}</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:16px;font-weight:800;color:var(--green2)">+${o.upside_pct}%</div>
+            <div style="font-size:11px;color:${confColor};font-weight:700">${o.confidence?.toUpperCase()}</div>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;margin-bottom:10px;background:rgba(0,0,0,.2);border-radius:8px;padding:8px">
+          <div>Current: <b>$${o.current_price?.toFixed(2)}</b></div>
+          <div>Target: <b style="color:var(--green2)">$${o.target_price?.toFixed(2)}</b></div>
+        </div>
+        <div style="font-size:13px;line-height:1.5;color:rgba(255,255,255,.85);margin-bottom:8px">${o.why_now}</div>
+        ${o.catalyst ? `<div style="font-size:11px;color:var(--gold2);margin-bottom:4px">⚡ ${o.catalyst}</div>` : ''}
+        ${o.his_fit ? `<div style="font-size:11px;color:var(--green2);margin-bottom:4px">✅ ${o.his_fit}</div>` : ''}
+        ${o.suggested_position_size ? `<div style="font-size:11px;color:var(--muted);margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,.08)">💵 Suggested position: ${o.suggested_position_size}</div>` : ''}
+      </div>`;
+    }
+  }
+  
+  if (d.sectors_to_hunt?.length) {
+    html += `<div class="sec-lbl">🔍 Sectors to Hunt</div>`;
+    for (const s of d.sectors_to_hunt) {
+      html += `<div style="background:rgba(26,79,214,.1);border-left:3px solid #93c5fd;border-radius:8px;padding:11px 13px;margin-bottom:6px">
+        <div style="font-size:13px;font-weight:800;color:#93c5fd;margin-bottom:4px">${s.sector}</div>
+        <div style="font-size:12px;color:rgba(255,255,255,.85);line-height:1.4">${s.reason}</div>
+        ${s.his_edge ? `<div style="font-size:11px;color:var(--green2);margin-top:4px">Your edge: ${s.his_edge}</div>` : ''}
+      </div>`;
+    }
+  }
+  
+  if (d.avoid_list?.length) {
+    html += `<div class="sec-lbl">🚫 Skip Despite the Hype</div>`;
+    for (const a of d.avoid_list) {
+      html += `<div style="background:rgba(220,38,38,.08);border-left:3px solid var(--red2);border-radius:8px;padding:10px 13px;margin-bottom:6px;font-size:12px"><b style="color:var(--red2)">${a.ticker}</b>: ${a.reason}</div>`;
+    }
+  }
+  
+  wrap.innerHTML = html;
+}
+
+function renderXray(wrap, d) {
+  const scoreColor = d.health_score >= 75 ? "var(--green2)" : d.health_score >= 50 ? "var(--warn2)" : "var(--red2)";
+  let html = `<div style="background:linear-gradient(135deg,rgba(26,79,214,.15),rgba(8,145,178,.1));border:1px solid rgba(26,79,214,.3);border-radius:15px;padding:15px 16px;margin-bottom:12px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <div style="font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--gold2);text-transform:uppercase">🔬 Portfolio X-Ray</div>
+      <div style="font-size:24px;font-weight:800;font-family:'Playfair Display',serif;color:${scoreColor}">${d.health_score}/100</div>
+    </div>
+    <div style="font-size:13px;line-height:1.6">${d.overall_assessment}</div>
+  </div>`;
+  
+  if (d.concentration_risks?.length) {
+    html += `<div class="sec-lbl">⚠️ Concentration Risks</div>`;
+    for (const r of d.concentration_risks) {
+      const sevColor = {high: "var(--red2)", medium: "var(--warn2)", low: "var(--muted)"}[r.severity] || "var(--muted)";
+      html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:11px;padding:12px;margin-bottom:6px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <div style="font-size:13px;font-weight:800">${r.issue}</div>
+          <div style="font-size:10px;color:${sevColor};font-weight:700">${r.severity?.toUpperCase()}</div>
+        </div>
+        <div style="font-size:12px;color:rgba(255,255,255,.85);line-height:1.5;margin-bottom:6px">${r.detail}</div>
+        <div style="font-size:11px;color:var(--gold2)">💡 Fix: ${r.fix}</div>
+      </div>`;
+    }
+  }
+  
+  if (d.sector_balance?.length) {
+    html += `<div class="sec-lbl">📊 Sector Balance</div>`;
+    for (const s of d.sector_balance) {
+      const statusColor = {over: "var(--red2)", balanced: "var(--green2)", under: "var(--warn2)"}[s.status] || "var(--muted)";
+      const barWidth = Math.min(100, s.exposure_pct || 0);
+      html += `<div style="background:var(--card);border-radius:9px;padding:10px;margin-bottom:5px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:5px;font-size:12px">
+          <div style="font-weight:700">${s.sector}</div>
+          <div><b style="color:${statusColor}">${s.exposure_pct}%</b> / rec max ${s.recommended_max}%</div>
+        </div>
+        <div style="height:6px;background:rgba(255,255,255,.05);border-radius:3px;overflow:hidden"><div style="height:100%;width:${barWidth}%;background:${statusColor}"></div></div>
+      </div>`;
+    }
+  }
+  
+  if (d.correlation_warnings?.length) {
+    html += `<div class="sec-lbl">🔗 Correlation Warnings</div>`;
+    for (const c of d.correlation_warnings) {
+      html += `<div style="background:rgba(217,119,6,.08);border-left:3px solid var(--warn2);border-radius:8px;padding:11px 13px;margin-bottom:6px">
+        <div style="font-size:12px;font-weight:700;margin-bottom:4px">${c.group}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,.8);margin-bottom:4px">${c.risk}</div>
+        <div style="font-size:11px;color:var(--gold2)">📍 ${c.reduce_to}</div>
+      </div>`;
+    }
+  }
+  
+  if (d.missing_sectors?.length) {
+    html += `<div class="sec-lbl">❌ Missing Sectors</div>`;
+    for (const m of d.missing_sectors) {
+      html += `<div style="background:rgba(26,79,214,.08);border-left:3px solid #93c5fd;border-radius:8px;padding:11px 13px;margin-bottom:6px">
+        <div style="font-size:12px;font-weight:700;color:#93c5fd;margin-bottom:4px">${m.sector}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,.8);margin-bottom:4px">${m.reason}</div>
+        <div style="font-size:11px;color:var(--green2)">➕ ${m.suggested}</div>
+      </div>`;
+    }
+  }
+  
+  if (d.top_3_actions?.length) {
+    html += `<div class="sec-lbl">🎯 Top 3 Actions</div>`;
+    for (let i = 0; i < d.top_3_actions.length; i++) {
+      html += `<div style="background:rgba(212,160,23,.1);border:1px solid rgba(253,230,138,.25);border-radius:11px;padding:11px 13px;margin-bottom:6px;display:flex;gap:10px;align-items:flex-start">
+        <div style="font-size:20px;font-weight:800;font-family:'Playfair Display',serif;color:var(--gold2);min-width:28px">${i+1}</div>
+        <div style="font-size:13px;line-height:1.5">${d.top_3_actions[i]}</div>
+      </div>`;
+    }
+  }
+  
+  wrap.innerHTML = html;
+}
+
+function renderOptimizer(wrap, d) {
+  let html = `<div style="background:var(--card);border:1px solid var(--border);border-radius:15px;padding:14px;margin-bottom:12px">
+    <div style="font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--gold2);text-transform:uppercase;margin-bottom:6px">⚖️ Position Optimizer</div>
+    <div style="font-size:13px;line-height:1.5">${d.summary || ''}</div>
+  </div>`;
+  
+  // Group by action
+  const byAction = {EXIT: [], TRIM: [], HOLD: [], ADD: []};
+  for (const r of (d.ratings || [])) {
+    if (byAction[r.action]) byAction[r.action].push(r);
+  }
+  
+  const actionConfig = {
+    ADD:  {color: "var(--green2)", bg: "rgba(5,150,105,.1)", border: "rgba(167,243,208,.3)", icon: "➕", label: "Buy More"},
+    HOLD: {color: "#93c5fd", bg: "rgba(26,79,214,.08)", border: "rgba(26,79,214,.25)", icon: "⏸️", label: "Hold"},
+    TRIM: {color: "var(--warn2)", bg: "rgba(217,119,6,.1)", border: "rgba(253,230,138,.3)", icon: "✂️", label: "Trim"},
+    EXIT: {color: "var(--red2)", bg: "rgba(220,38,38,.1)", border: "rgba(252,165,165,.3)", icon: "🚪", label: "Exit"}
+  };
+  
+  // Show in priority order: ADD, EXIT, TRIM, HOLD
+  for (const action of ["ADD", "EXIT", "TRIM", "HOLD"]) {
+    const items = byAction[action];
+    if (!items.length) continue;
+    const cfg = actionConfig[action];
+    html += `<div class="sec-lbl">${cfg.icon} ${cfg.label} (${items.length})</div>`;
+    for (const r of items) {
+      html += `<div style="background:${cfg.bg};border:1px solid ${cfg.border};border-radius:11px;padding:12px;margin-bottom:6px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+          <div>
+            <div style="font-size:15px;font-weight:800;font-family:'Playfair Display',serif">${r.ticker}</div>
+            ${r.priority ? `<div style="font-size:10px;color:var(--muted);margin-top:2px">Priority: ${r.priority.replace('_', ' ')}</div>` : ''}
+          </div>
+          <div style="font-size:10px;font-weight:700;color:${cfg.color};background:rgba(0,0,0,.2);padding:3px 9px;border-radius:10px">${r.confidence?.toUpperCase() || ''}</div>
+        </div>
+        <div style="font-size:12px;color:rgba(255,255,255,.85);line-height:1.5">${r.reason}</div>
+        ${r.specific_quantity ? `<div style="font-size:11px;color:${cfg.color};margin-top:5px;font-weight:700">📐 ${r.specific_quantity}</div>` : ''}
+        ${r.wash_warning ? `<div style="font-size:11px;color:var(--red2);margin-top:5px">⚠️ ${r.wash_warning}</div>` : ''}
+      </div>`;
+    }
+  }
+  
+  wrap.innerHTML = html;
 }
 
 // ── BOOT ───────────────────────────────────────────────────────────
