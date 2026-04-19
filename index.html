@@ -173,7 +173,7 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
     <label class="s-label">Brother's Email (also gets alerts)</label>
     <input class="s-input" id="s-e2" type="email" placeholder="brother@gmail.com">
   </div>
-  <button class="s-btn" onclick="doSetup()">Open My Trader →</button>
+  <button class="s-btn" id="setup-go-btn" onclick="doSetup()">Open My Trader →</button>
 </div>
 
 <div id="app">
@@ -183,7 +183,10 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
         <div class="hname">Morris Gabbay</div>
         <div class="hdate" id="hdate"></div>
       </div>
-      <button class="hbtn" onclick="refreshAll()"><span id="rico">↻</span> Refresh</button>
+      <div style="display:flex;gap:8px">
+        <button class="hbtn" onclick="refreshAll()"><span id="rico">↻</span> Refresh</button>
+        <button class="hbtn" onclick="sw('cfg')" style="padding:8px 10px">⚙️</button>
+      </div>
     </div>
     <div class="stats">
       <div class="stat" id="st-c"><div class="sv" id="sv-c">0</div><div class="sl">Conflicts</div></div>
@@ -194,19 +197,29 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
 
   <div class="content">
     <div class="tab active" id="tab-dash">
-      <div class="portfolio-card">
-        <div class="sec-lbl" style="margin-top:0">Portfolio Snapshot — Apr 18, 2026</div>
-        <div class="pg">
-          <div><div class="pgl">Market Value</div><div class="pgv">$3.42M</div></div>
-          <div><div class="pgl">Positions</div><div class="pgv">76</div></div>
-          <div><div class="pgl">Unrealized G/L</div><div class="pgv" style="font-size:16px;color:var(--red2)">-$384K</div></div>
-          <div><div class="pgl">Today +/-</div><div class="pgv" style="font-size:16px;color:var(--green2)">+$26.9K</div></div>
+      <div class="portfolio-card" id="portfolio-card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <div class="sec-lbl" style="margin:0">Portfolio Live</div>
+          <div id="price-age" style="font-size:10px;color:var(--muted)"></div>
         </div>
-        <div class="pgn">⚠️ Biggest losses: CRM -$214K · NOW -$55K · AVAV -$21K · JD -$20K</div>
+        <div class="pg" id="port-stats">
+          <div><div class="pgl">Market Value</div><div class="pgv" id="port-val">—</div></div>
+          <div><div class="pgl">Positions</div><div class="pgv" id="port-pos">—</div></div>
+          <div><div class="pgl">Unrealized G/L</div><div class="pgv" id="port-unrealized" style="font-size:16px">—</div></div>
+          <div><div class="pgl">Today +/-</div><div class="pgv" id="port-today" style="font-size:16px">—</div></div>
+        </div>
+        <div class="pgn" id="port-highlights">Loading live data...</div>
       </div>
       <div id="alerts-wrap"></div>
       <div id="locks-wrap"></div>
       <div id="dash-empty" style="display:none" class="empty"><div class="ei">✅</div>No conflicts today. All clean.</div>
+      <div id="dash-no-data" style="display:none" class="empty">
+        <div class="ei">📥</div>
+        <div>No trade data loaded yet.<br><br>
+        <button onclick="document.getElementById(\'import-from-dash\').click()" style="background:var(--green);color:#fff;border:none;border-radius:11px;padding:12px 24px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\',sans-serif;margin-top:8px">Import Backup File</button>
+        <input type="file" id="import-from-dash" accept=".json" style="display:none" onchange="importTrades(event); sw(\'dash\')">
+        </div>
+      </div>
     </div>
 
     <div class="tab" id="tab-brief">
@@ -223,12 +236,16 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
       <div class="check-card">
         <div class="check-row">
           <input class="c-input" id="c-ticker" placeholder="Ticker e.g. AMD" maxlength="6" oninput="this.value=this.value.toUpperCase()">
-          <select class="c-sel" id="c-action">
+          <select class="c-sel" id="c-action" onchange="updateCheckFields()">
             <option value="BUY">BUY</option>
             <option value="SELL">SELL</option>
           </select>
         </div>
-        <button class="c-btn" onclick="checkTrade()">Check This Trade</button>
+        <div class="check-row">
+          <input class="c-input" id="c-shares" type="number" placeholder="Shares" style="font-size:14px">
+          <input class="c-input" id="c-price" type="number" step="0.01" placeholder="Price $" style="font-size:14px">
+        </div>
+        <button class="c-btn" onclick="checkTradeAdvanced()">🔍 Full Analysis</button>
         <div id="c-result"></div>
       </div>
     </div>
@@ -252,14 +269,77 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
       <div id="trades-wrap"></div>
     </div>
 
+    <!-- CALENDAR TAB -->
+    <div class="tab" id="tab-cal">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:9px;margin-top:4px">
+        <div class="sec-lbl" style="margin:0">Earnings Calendar — Next 30 Days</div>
+        <button onclick="loadCalendar()" id="cal-refresh-btn" style="background:var(--card);border:1px solid var(--border);color:var(--muted);border-radius:9px;padding:7px 13px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif">↻ Refresh</button>
+      </div>
+      <div id="calendar-wrap">
+        <div class="empty"><div class="ei">📅</div>Tap Refresh to load earnings calendar for your positions.</div>
+      </div>
+    </div>
+
+    <!-- INSIGHTS TAB - Pattern Recognition -->
+    <div class="tab" id="tab-insights">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:9px;margin-top:4px">
+        <div class="sec-lbl" style="margin:0">Trading Patterns — What Actually Works</div>
+        <button onclick="runPatternAnalysis()" id="insights-btn" style="background:linear-gradient(135deg,var(--blue),var(--teal));border:none;color:#fff;border-radius:9px;padding:7px 13px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif">🧠 Analyze</button>
+      </div>
+      <div id="insights-wrap">
+        <div class="empty"><div class="ei">💡</div>Tap Analyze to run deep pattern analysis on your 981 trades. Find what makes money and what doesn't.</div>
+      </div>
+    </div>
+
     <div class="tab" id="tab-cfg">
       <div class="sec-lbl">Settings</div>
       <div class="cfg-card">
-        <div class="cfg-title">API &amp; Alerts</div>
+        <div class="cfg-title">API Keys</div>
         <div class="cfg-f"><label class="cfg-lbl">Anthropic API Key</label><input class="cfg-inp" id="cfg-api" type="password" placeholder="sk-ant-..."></div>
+        <div class="cfg-f"><label class="cfg-lbl">Finnhub API Key (for live prices)</label><input class="cfg-inp" id="cfg-finnhub" type="password" placeholder="Get free at finnhub.io"></div>
+      </div>
+
+      <div class="cfg-card">
+        <div class="cfg-title">Tax Profile</div>
+        <div class="cfg-f">
+          <label class="cfg-lbl">Federal Tax Bracket</label>
+          <select class="cfg-inp" id="cfg-bracket">
+            <option value="10">10% - Up to $11,600</option>
+            <option value="12">12% - $11,601 to $47,150</option>
+            <option value="22">22% - $47,151 to $100,525</option>
+            <option value="24">24% - $100,526 to $191,950</option>
+            <option value="32">32% - $191,951 to $243,725</option>
+            <option value="35">35% - $243,726 to $609,350</option>
+            <option value="37" selected>37% - Over $609,350</option>
+          </select>
+        </div>
+        <div class="cfg-f">
+          <label class="cfg-lbl">Long-Term Capital Gains Rate</label>
+          <select class="cfg-inp" id="cfg-ltcg">
+            <option value="0">0%</option>
+            <option value="15">15%</option>
+            <option value="20" selected>20%</option>
+          </select>
+        </div>
+        <div class="cfg-f">
+          <label class="cfg-lbl">State</label>
+          <select class="cfg-inp" id="cfg-state">
+            <option value="FL" selected>Florida (no state income tax)</option>
+            <option value="TX">Texas (no state income tax)</option>
+            <option value="NY">New York (up to 10.9%)</option>
+            <option value="NJ">New Jersey (up to 10.75%)</option>
+            <option value="CA">California (up to 13.3%)</option>
+            <option value="PA">Pennsylvania (3.07%)</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="cfg-card">
+        <div class="cfg-title">Alert Emails</div>
         <div class="cfg-f"><label class="cfg-lbl">Morris Email</label><input class="cfg-inp" id="cfg-e1" type="email"></div>
         <div class="cfg-f"><label class="cfg-lbl">Brother Email</label><input class="cfg-inp" id="cfg-e2" type="email"></div>
-        <button class="cfg-save" onclick="saveCfg()">Save</button>
+        <button class="cfg-save" onclick="saveCfg()">Save All Settings</button>
       </div>
 
       <div class="cfg-card">
@@ -308,8 +388,9 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
   <button class="ni2 active" onclick="sw('dash')" id="nb-dash"><span class="nico">📊</span><span class="nlbl">Home</span><div class="ndot"></div></button>
   <button class="ni2" onclick="sw('brief')" id="nb-brief"><span class="nico">🌅</span><span class="nlbl">Brief</span><div class="ndot"></div></button>
   <button class="ni2" onclick="sw('check')" id="nb-check"><span class="nico">🔍</span><span class="nlbl">Check</span><div class="ndot"></div></button>
+  <button class="ni2" onclick="sw('cal')" id="nb-cal"><span class="nico">📅</span><span class="nlbl">Calendar</span><div class="ndot"></div></button>
+  <button class="ni2" onclick="sw('insights')" id="nb-insights"><span class="nico">💡</span><span class="nlbl">Insights</span><div class="ndot"></div></button>
   <button class="ni2" onclick="sw('log')" id="nb-log"><span class="nico">📋</span><span class="nlbl">Trades</span><div class="ndot"></div></button>
-  <button class="ni2" onclick="sw('cfg')" id="nb-cfg"><span class="nico">⚙️</span><span class="nlbl">Settings</span><div class="ndot"></div></button>
 </nav>
 
 <script>
@@ -361,6 +442,287 @@ function isGmailConnected() {
   return !!getGmailToken();
 }
 
+
+// ══════════════════════════════════════════════════════════════════
+// LIVE PRICES — Finnhub API
+// ══════════════════════════════════════════════════════════════════
+async function fetchLivePrices() {
+  if (!S.cfg.finnhubKey) return;
+  const pos = buildPos();
+  const tickers = Object.keys(pos).filter(t => pos[t].shares > 0);
+  if (!tickers.length) return;
+  
+  // Fetch in batches to respect 60/min rate limit
+  const prices = {};
+  const now = Date.now();
+  
+  // Only fetch if prices are older than 5 minutes (cache)
+  if (S.pricesUpdated && (now - S.pricesUpdated) < 300000) {
+    return S.prices;
+  }
+  
+  for (let i = 0; i < tickers.length; i++) {
+    const ticker = tickers[i];
+    try {
+      const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${ticker}&token=${S.cfg.finnhubKey}`);
+      const data = await res.json();
+      if (data.c && data.c > 0) {
+        prices[ticker] = {
+          current: data.c,        // Current price
+          change: data.d,         // Change $
+          changePct: data.dp,     // Change %
+          high: data.h,
+          low: data.l,
+          open: data.o,
+          prevClose: data.pc,
+          updated: now
+        };
+      }
+      // Respect rate limit: 60/min = 1 per second max
+      if (i < tickers.length - 1 && i % 30 === 29) {
+        await new Promise(r => setTimeout(r, 1100));
+      }
+    } catch(e) {
+      console.log(`Price fetch failed for ${ticker}:`, e);
+    }
+  }
+  
+  S.prices = prices;
+  S.pricesUpdated = now;
+  sv("prices", prices);
+  sv("pricesUpdated", now);
+  return prices;
+}
+
+async function fetchHistoricalPrices(ticker, daysBack = 365) {
+  if (!S.cfg.finnhubKey) return null;
+  try {
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - (daysBack * 86400);
+    const res = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${ticker}&resolution=D&from=${from}&to=${to}&token=${S.cfg.finnhubKey}`);
+    const data = await res.json();
+    if (data.s !== "ok") return null;
+    return data.c.map((close, i) => ({
+      date: new Date(data.t[i] * 1000).toISOString().split("T")[0],
+      open: data.o[i],
+      high: data.h[i],
+      low: data.l[i],
+      close: close,
+      volume: data.v[i]
+    }));
+  } catch(e) {
+    console.log("Historical fetch failed:", e);
+    return null;
+  }
+}
+
+async function fetchEarningsCalendar() {
+  if (!S.cfg.finnhubKey) return [];
+  const pos = buildPos();
+  const tickers = Object.keys(pos).filter(t => pos[t].shares > 0);
+  const today = new Date();
+  const future = new Date(today.getTime() + 30 * 86400000);
+  const from = today.toISOString().split("T")[0];
+  const to = future.toISOString().split("T")[0];
+  
+  const earnings = [];
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${from}&to=${to}&token=${S.cfg.finnhubKey}`);
+    const data = await res.json();
+    if (data.earningsCalendar) {
+      for (const e of data.earningsCalendar) {
+        if (tickers.includes(e.symbol)) {
+          earnings.push({
+            ticker: e.symbol,
+            date: e.date,
+            hour: e.hour,           // bmo=before market open, amc=after market close
+            epsEstimate: e.epsEstimate,
+            revenueEstimate: e.revenueEstimate
+          });
+        }
+      }
+    }
+    earnings.sort((a,b) => a.date.localeCompare(b.date));
+    S.earnings = earnings;
+    S.earningsDate = new Date().toISOString().split("T")[0];
+    sv("earnings", earnings);
+    sv("earningsDate", S.earningsDate);
+    return earnings;
+  } catch(e) {
+    console.log("Earnings fetch failed:", e);
+    return [];
+  }
+}
+
+
+
+// ══════════════════════════════════════════════════════════════════
+// SECTOR MAPPING — Find competitors that affect his positions
+// ══════════════════════════════════════════════════════════════════
+const SECTOR_MAP = {
+  // Semiconductors
+  "NVDA": {sector: "Semiconductors", competitors: ["AMD", "AVGO", "TSM", "INTC", "MU", "QCOM", "MRVL", "ASML", "SMCI"]},
+  "AMD":  {sector: "Semiconductors", competitors: ["NVDA", "INTC", "AVGO", "TSM", "QCOM", "MU", "MRVL"]},
+  "AVGO": {sector: "Semiconductors", competitors: ["NVDA", "AMD", "QCOM", "MRVL", "TSM"]},
+  "MU":   {sector: "Semiconductors", competitors: ["NVDA", "AMD", "INTC", "TSM"]},
+  "MRVL": {sector: "Semiconductors", competitors: ["AVGO", "NVDA", "AMD", "QCOM"]},
+  "ARM":  {sector: "Semiconductors", competitors: ["NVDA", "AMD", "QCOM", "INTC"]},
+  "SMCI": {sector: "Semiconductors", competitors: ["NVDA", "AMD", "DELL"]},
+  
+  // Big Tech / Cloud
+  "AAPL": {sector: "Big Tech", competitors: ["MSFT", "GOOGL", "AMZN", "META"]},
+  "MSFT": {sector: "Big Tech / Cloud", competitors: ["AAPL", "GOOGL", "AMZN", "ORCL", "CRM"]},
+  "GOOGL":{sector: "Big Tech / Cloud", competitors: ["AAPL", "MSFT", "AMZN", "META"]},
+  "AMZN": {sector: "Big Tech / Retail", competitors: ["GOOGL", "MSFT", "WMT", "TGT", "SHOP"]},
+  "META": {sector: "Big Tech / Social", competitors: ["GOOGL", "SNAP", "PINS", "RBLX"]},
+  "CRM":  {sector: "Enterprise SaaS", competitors: ["NOW", "ORCL", "ADBE", "MSFT", "WDAY"]},
+  "NOW":  {sector: "Enterprise SaaS", competitors: ["CRM", "ORCL", "MSFT", "WDAY"]},
+  "ORCL": {sector: "Enterprise SaaS / Cloud", competitors: ["CRM", "NOW", "MSFT", "SAP"]},
+  "ADBE": {sector: "Software", competitors: ["CRM", "MSFT", "NOW", "FIG"]},
+  "MDB":  {sector: "Database / Cloud", competitors: ["ORCL", "SNOW", "DDOG"]},
+  "SNOW": {sector: "Data / Cloud", competitors: ["MDB", "DDOG", "PLTR", "ORCL"]},
+  "PLTR": {sector: "Data / Analytics", competitors: ["SNOW", "MDB", "PANW"]},
+  "CRWD": {sector: "Cybersecurity", competitors: ["PANW", "ZS", "OKTA", "NET"]},
+  "PANW": {sector: "Cybersecurity", competitors: ["CRWD", "ZS", "NET", "FTNT"]},
+  "FIG":  {sector: "Design Software", competitors: ["ADBE", "CRM"]},
+  
+  // AI / Compute
+  "CRWV": {sector: "AI Compute", competitors: ["NVDA", "AMD", "ORCL", "MSFT"]},
+  "AI":   {sector: "AI Software", competitors: ["PLTR", "SNOW", "MSFT"]},
+  
+  // China Tech
+  "BABA": {sector: "China Tech", competitors: ["JD", "PDD", "BIDU", "TCEHY"]},
+  "JD":   {sector: "China E-commerce", competitors: ["BABA", "PDD", "BIDU"]},
+  "PDD":  {sector: "China E-commerce", competitors: ["BABA", "JD", "BIDU"]},
+  "BIDU": {sector: "China Tech", competitors: ["BABA", "JD", "TCEHY"]},
+  
+  // Finance / Crypto
+  "COIN": {sector: "Crypto / Fintech", competitors: ["HOOD", "MSTR", "SQ"]},
+  "HOOD": {sector: "Fintech / Trading", competitors: ["COIN", "SCHW", "IBKR"]},
+  "IBIT": {sector: "Bitcoin ETF", competitors: ["COIN", "MSTR"]},
+  
+  // Defense / Aerospace
+  "BA":   {sector: "Aerospace", competitors: ["LMT", "RTX", "GE", "NOC"]},
+  "AVAV": {sector: "Defense Tech", competitors: ["LMT", "RTX", "KTOS", "NOC"]},
+  "ESLT": {sector: "Defense", competitors: ["LMT", "RTX", "NOC"]},
+  
+  // Energy / Nuclear
+  "OKLO": {sector: "Nuclear Energy", competitors: ["CCJ", "NNE", "SMR", "VST"]},
+  "VST":  {sector: "Energy", competitors: ["NEE", "DUK", "OKLO", "CCJ"]},
+  "UCO":  {sector: "Oil", competitors: ["XOM", "CVX", "COP"]},
+  
+  // Healthcare
+  "UNH":  {sector: "Healthcare Insurance", competitors: ["HUM", "CVS", "ELV", "CI"]},
+  "HUM":  {sector: "Healthcare Insurance", competitors: ["UNH", "CVS", "ELV"]},
+  "HIMS": {sector: "Telehealth", competitors: ["TDOC", "AMWL", "LLY"]},
+  "NVO":  {sector: "Pharma / Weight Loss", competitors: ["LLY", "PFE"]},
+  "TEVA": {sector: "Generic Pharma", competitors: ["PFE", "MRK"]},
+  
+  // Other Equities
+  "NKE":  {sector: "Consumer Apparel", competitors: ["LULU", "ADDYY", "UAA"]},
+  "HD":   {sector: "Retail / Home", competitors: ["LOW", "WMT"]},
+  "IBM":  {sector: "Enterprise Tech", competitors: ["ORCL", "MSFT", "DELL", "HPE"]},
+  "NFLX": {sector: "Streaming / Media", competitors: ["DIS", "WBD", "PARA"]},
+  "TSLA": {sector: "EV / Auto", competitors: ["RIVN", "F", "GM", "NIO"]},
+  "TTD":  {sector: "AdTech", competitors: ["GOOGL", "META", "APP"]},
+  "LASR": {sector: "Laser Tech", competitors: ["IPGP", "COHR"]},
+  "RGTI": {sector: "Quantum Computing", competitors: ["IONQ", "IBM"]},
+  "TLRY": {sector: "Cannabis", competitors: ["CGC", "CRON"]},
+  "IEP":  {sector: "Holding Company", competitors: []},
+  "ZOMDF":{sector: "Biotech", competitors: []},
+};
+
+function getSectorInfo(ticker) {
+  return SECTOR_MAP[ticker] || null;
+}
+
+function findSectorImpact(newsTickerOrEarnings) {
+  // Given a ticker from news/earnings, return which of HIS holdings it affects
+  const pos = buildPos();
+  const heldTickers = new Set(Object.keys(pos).filter(t => pos[t].shares > 0));
+  const affected = [];
+  
+  // Direct: does he hold this ticker?
+  const holdsDirectly = heldTickers.has(newsTickerOrEarnings);
+  
+  // Indirect: search SECTOR_MAP for competitors matching his holdings
+  for (const [heldTicker, info] of Object.entries(SECTOR_MAP)) {
+    if (!heldTickers.has(heldTicker)) continue;
+    if (info.competitors.includes(newsTickerOrEarnings)) {
+      affected.push({heldTicker, sector: info.sector, relationship: "competitor"});
+    }
+  }
+  
+  // Also: if newsTicker itself has a sector mapping, check if any of his holdings are competitors of it
+  const newsInfo = SECTOR_MAP[newsTickerOrEarnings];
+  if (newsInfo) {
+    for (const comp of newsInfo.competitors) {
+      if (heldTickers.has(comp) && !affected.find(a => a.heldTicker === comp)) {
+        affected.push({heldTicker: comp, sector: newsInfo.sector, relationship: "same-sector"});
+      }
+    }
+  }
+  
+  return {holdsDirectly, affected, sector: newsInfo?.sector || null};
+}
+
+async function fetchEarningsCalendarExpanded() {
+  // Fetch earnings for his positions AND for their sector competitors
+  if (!S.cfg.finnhubKey) return [];
+  
+  const pos = buildPos();
+  const heldTickers = Object.keys(pos).filter(t => pos[t].shares > 0);
+  
+  // Build expanded ticker list: his holdings + their top 3 competitors
+  const expandedSet = new Set(heldTickers);
+  for (const ticker of heldTickers) {
+    const info = SECTOR_MAP[ticker];
+    if (info) {
+      for (const comp of info.competitors.slice(0, 3)) {
+        expandedSet.add(comp);
+      }
+    }
+  }
+  
+  const today = new Date();
+  const future = new Date(today.getTime() + 30 * 86400000);
+  const from = today.toISOString().split("T")[0];
+  const to = future.toISOString().split("T")[0];
+  
+  const earnings = [];
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${from}&to=${to}&token=${S.cfg.finnhubKey}`);
+    const data = await res.json();
+    if (data.earningsCalendar) {
+      for (const e of data.earningsCalendar) {
+        if (expandedSet.has(e.symbol)) {
+          const impact = findSectorImpact(e.symbol);
+          earnings.push({
+            ticker: e.symbol,
+            date: e.date,
+            hour: e.hour,
+            epsEstimate: e.epsEstimate,
+            revenueEstimate: e.revenueEstimate,
+            isHolding: impact.holdsDirectly,
+            sector: impact.sector,
+            affectsHoldings: impact.affected
+          });
+        }
+      }
+    }
+    earnings.sort((a,b) => a.date.localeCompare(b.date));
+    S.earnings = earnings;
+    S.earningsDate = new Date().toISOString().split("T")[0];
+    sv("earnings", earnings);
+    sv("earningsDate", S.earningsDate);
+    return earnings;
+  } catch(e) {
+    console.log("Expanded earnings fetch failed:", e);
+    return [];
+  }
+}
+
+
 // ── SEED DATA ──────────────────────────────────────────────────────
 // Trade history and alternatives are loaded from device localStorage.
 // On first run, import data using the Import button in Settings.
@@ -371,7 +733,7 @@ const ALTERNATIVES  = {};
 const DEFAULT_ALTS  = [{"ticker": "SPY", "reason": "S&P 500 ETF. Keeps you in the market broadly.", "sector": "ETF"}, {"ticker": "QQQ", "reason": "Nasdaq ETF. Tech and growth exposure.", "sector": "ETF"}, {"ticker": "XLK", "reason": "Technology sector ETF.", "sector": "ETF"}];
 
 // ── STATE ──────────────────────────────────────────────────────────
-let S = { trades:[], brief:null, briefDate:null, mode:"moderate", cfg:{}, conflicts:[], lockouts:{} };
+let S = { trades:[], brief:null, briefDate:null, mode:"moderate", cfg:{}, conflicts:[], lockouts:{}, prices:{}, pricesUpdated:null, patterns:null, patternsDate:null, earnings:[], earningsDate:null };
 
 // ── STORAGE ────────────────────────────────────────────────────────
 const sv = (k,v) => { try{localStorage.setItem("mt_"+k, JSON.stringify(v))}catch(e){} };
@@ -386,9 +748,24 @@ const dunt = d => Math.ceil((new Date(d+"T12:00:00")-new Date())/86400000);
 
 // ── SETUP ──────────────────────────────────────────────────────────
 function doSetup(){
-  const cfg={apiKey:document.getElementById("s-api").value.trim(), email1:document.getElementById("s-e1").value.trim(), email2:document.getElementById("s-e2").value.trim()};
-  if(!cfg.apiKey){alert("Please enter your Anthropic API key.");return;}
-  sv("cfg",cfg); S.cfg=cfg; launch();
+  console.log("doSetup called");
+  const apiKey = document.getElementById("s-api").value.trim();
+  const email1 = document.getElementById("s-e1").value.trim();
+  const email2 = document.getElementById("s-e2").value.trim();
+  
+  if(!apiKey){
+    alert("Please enter your Anthropic API key (starts with sk-ant-)");
+    return;
+  }
+  if(!apiKey.startsWith("sk-ant-")){
+    if(!confirm("API key should start with sk-ant-. Continue anyway?")) return;
+  }
+  
+  const cfg = {apiKey, email1: email1 || "morrisgabbay@gmail.com", email2};
+  sv("cfg", cfg);
+  S.cfg = cfg;
+  console.log("Setup saved, launching app...");
+  launch();
 }
 
 function launch(){
@@ -405,6 +782,12 @@ async function init(){
   S.brief        = ld("brief",null);
   S.briefDate    = ld("briefDate",null);
   S.closingPrices = ld("closingPrices",{});
+  S.prices        = ld("prices",{});
+  S.pricesUpdated = ld("pricesUpdated",null);
+  S.patterns      = ld("patterns",null);
+  S.patternsDate  = ld("patternsDate",null);
+  S.earnings      = ld("earnings",[]);
+  S.earningsDate  = ld("earningsDate",null);
 
   // Seed trades if first run
   if(S.trades.length===0){ S.trades=SEED_TRADES; sv("trades",S.trades); }
@@ -417,10 +800,25 @@ async function init(){
 
   // Populate settings
   if(S.cfg.apiKey) document.getElementById("cfg-api").value=S.cfg.apiKey;
+  if(S.cfg.finnhubKey) document.getElementById("cfg-finnhub").value=S.cfg.finnhubKey;
   if(S.cfg.email1) document.getElementById("cfg-e1").value=S.cfg.email1;
   if(S.cfg.email2) document.getElementById("cfg-e2").value=S.cfg.email2;
+  if(S.cfg.bracket) document.getElementById("cfg-bracket").value=S.cfg.bracket;
+  if(S.cfg.ltcg !== undefined) document.getElementById("cfg-ltcg").value=S.cfg.ltcg;
+  if(S.cfg.state) document.getElementById("cfg-state").value=S.cfg.state;
+  // Default tax bracket
+  if(!S.cfg.bracket) S.cfg.bracket = 37;
+  if(S.cfg.ltcg === undefined) S.cfg.ltcg = 20;
 
   computeWS();
+  
+  // Fetch live prices in background on init
+  if (S.cfg.finnhubKey) {
+    fetchLivePrices().then(() => {
+      renderDash();
+    });
+  }
+  
   renderDash();
   renderTrades();
   renderStats();
@@ -554,6 +952,16 @@ async function genBrief(){
 
   const now = new Date().toLocaleString("en-US", {timeZone: "America/New_York", weekday:"long", month:"long", day:"numeric", hour:"numeric", minute:"2-digit"});
 
+  // Build sector context so AI knows which competitors affect his holdings
+  const sectorContext = [];
+  for (const t of Object.keys(pos).filter(t => pos[t].shares > 0)) {
+    const info = SECTOR_MAP[t];
+    if (info) {
+      sectorContext.push(`${t} (${info.sector}) — watch competitors: ${info.competitors.slice(0,4).join(", ")}`);
+    }
+  }
+  const sectorStr = sectorContext.join("\n") || "no sector data";
+  
   const prompt = `Current time in New York: ${now}
 Session: ${ctx.session}
 ${ctx.planFor}
@@ -566,13 +974,17 @@ His top holdings: ${topTickers}
 His positions with latest prices:
 ${posLines}
 
+SECTOR RELATIONSHIPS — competitor moves affect his stocks:
+${sectorStr}
+
 Wash sale lockouts (NEVER suggest selling these at a loss): ${lockStr}
 
 YOUR JOB:
-1. Search your knowledge for the LATEST news on his holdings as of RIGHT NOW
-2. Factor in: earnings reports, Fed news, geopolitical events, international market moves, pre-market futures, after-hours moves — whatever is most relevant for ${ctx.planFor}
-3. Give trade suggestions appropriate for ${ctx.session} — if weekend/evening, plan for NEXT trading day
-4. All prices must be CURRENT or projected for next open — not stale
+1. Search your knowledge for the LATEST news on his holdings AND their sector competitors as of RIGHT NOW
+2. If a competitor has news (earnings, downgrade, product launch), flag how it affects HIS holdings. Example: "TSM reports today — likely moves NVDA, AMD"
+3. Factor in: earnings reports, Fed news, geopolitical events, international market moves, pre-market futures, after-hours moves
+4. Give trade suggestions appropriate for ${ctx.session} — if weekend/evening, plan for NEXT trading day
+5. All prices must be CURRENT or projected for next open — not stale
 
 Return ONLY valid JSON, no markdown:
 {
@@ -580,36 +992,30 @@ Return ONLY valid JSON, no markdown:
   "session": "${ctx.session}",
   "plan_for": "${ctx.planFor}",
   "market_mood": "bullish OR bearish OR mixed",
-  "key_events": "One sentence about biggest market event right now (earnings, Fed, geopolitical, etc)",
+  "key_events": "One sentence about biggest market event right now",
   "news": [
-    {"ticker": "AMD", "summary": "1-2 short plain sentences — CURRENT news only", "impact": "good OR bad OR neutral", "price": 124.50}
+    {"ticker": "NVDA", "summary": "CURRENT news — 1-2 short plain sentences", "impact": "good OR bad OR neutral", "price": 201.50, "is_holding": true, "affects": []},
+    {"ticker": "TSM", "summary": "TSM earnings miss — chip sector under pressure", "impact": "bad", "price": 180.00, "is_holding": false, "affects": ["NVDA", "AMD", "AVGO"]}
   ],
-  "conservative": {
-    "theme": "One sentence describing approach for ${ctx.planFor}",
-    "trades": [
-      {"action": "BUY OR SELL OR HOLD", "ticker": "AMD", "shares": 25, "price": 124.50, "reason": "1-2 plain short sentences with current context", "wash_risk": false}
-    ]
-  },
+  "conservative": {"theme": "...", "trades": [{"action": "BUY OR SELL OR HOLD", "ticker": "AMD", "shares": 25, "price": 124.50, "reason": "...", "wash_risk": false}]},
   "moderate": {"theme": "...", "trades": [...]},
   "active": {"theme": "...", "trades": [...]}
 }
 
 Rules:
-- conservative: 2 suggestions max, lowest risk
-- moderate: 3-4 suggestions  
-- active: 4-5 suggestions, more aggressive
-- NEVER suggest selling more than 25% of held position at once
+- news should mix: his direct holdings (is_holding: true) AND sector competitors that affect his stocks (is_holding: false, affects: [list of his holdings])
+- For sector news, "affects" array must list which of HIS tickers are impacted
+- conservative: 2 suggestions max · moderate: 3-4 · active: 4-5
+- NEVER suggest selling more than 25% of held position
 - Mark wash_risk true if ticker is in lockouts
-- Prices must reflect ${ctx.isMarketOpen ? "current live price" : "expected next open price"}
-- Weekend/evening suggestions should specifically mention "for Monday" or "for tomorrow open"
-- SHORT simple English — he is elderly and English is second language`;
+- SHORT simple English — he is elderly`;
 
   try{
     const res=await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({
-        model:"claude-sonnet-4-20250514",
+        model:"claude-opus-4-7",
         max_tokens:2000,
         system: "You are a real-time market analyst. Always use the most current market information available to you. Factor in time of day, session, and recent news. Be specific with prices.",
         messages:[{role:"user",content:prompt}]
@@ -778,8 +1184,424 @@ function updateGmailStatus() {
     document.getElementById('gmail-btn').style.background = 'rgba(5,150,105,0.2)';
     document.getElementById('gmail-btn').style.border = '1px solid rgba(167,243,208,0.3)';
   } else {
-    el.innerHTML = '⚠️ <span style="color:var(--warn2);font-weight:700">Not connected</span> — new trades won't be imported automatically';
+    el.innerHTML = "⚠️ <span style=\"color:var(--warn2);font-weight:700\">Not connected</span> — new trades will not be imported automatically";
   }
+}
+
+function renderPortfolio() {
+  const pos = buildPos();
+  const tickers = Object.keys(pos).filter(t => pos[t].shares > 0);
+  let totalVal = 0, totalCost = 0, dayChange = 0;
+  const gains = [], losses = [];
+  
+  for (const t of tickers) {
+    const holding = pos[t];
+    const live = S.prices[t];
+    let price, change;
+    if (live) {
+      price = live.current;
+      change = live.change;
+    } else if (S.closingPrices?.[t]) {
+      price = S.closingPrices[t].price;
+      change = 0;
+    } else {
+      price = holding.avg;
+      change = 0;
+    }
+    const mktVal = holding.shares * price;
+    const cost = holding.shares * holding.avg;
+    const unreal = mktVal - cost;
+    totalVal += mktVal;
+    totalCost += cost;
+    dayChange += holding.shares * change;
+    if (unreal >= 0) gains.push({ticker:t, amount:unreal});
+    else losses.push({ticker:t, amount:unreal});
+  }
+  
+  const unrealized = totalVal - totalCost;
+  const unrealPct = totalCost > 0 ? (unrealized / totalCost) * 100 : 0;
+  const dayPct = totalVal > 0 ? (dayChange / (totalVal - dayChange)) * 100 : 0;
+  
+  const fmtMoney = n => {
+    const abs = Math.abs(n);
+    if (abs >= 1e6) return (n/1e6).toFixed(2) + "M";
+    if (abs >= 1e3) return (n/1e3).toFixed(1) + "K";
+    return n.toFixed(0);
+  };
+  
+  document.getElementById("port-val").textContent = "$" + fmtMoney(totalVal);
+  document.getElementById("port-pos").textContent = tickers.length;
+  
+  const urEl = document.getElementById("port-unrealized");
+  urEl.textContent = (unrealized >= 0 ? "+" : "-") + "$" + fmtMoney(Math.abs(unrealized));
+  urEl.style.color = unrealized >= 0 ? "var(--green2)" : "var(--red2)";
+  
+  const dayEl = document.getElementById("port-today");
+  dayEl.textContent = (dayChange >= 0 ? "+" : "-") + "$" + fmtMoney(Math.abs(dayChange));
+  dayEl.style.color = dayChange >= 0 ? "var(--green2)" : "var(--red2)";
+  
+  // Highlights line
+  losses.sort((a,b) => a.amount - b.amount);
+  gains.sort((a,b) => b.amount - a.amount);
+  const topLosses = losses.slice(0,4).map(l => `${l.ticker} ${fmtMoney(l.amount)}`).join(" · ");
+  const topGains = gains.slice(0,3).map(g => `${g.ticker} +${fmtMoney(g.amount)}`).join(" · ");
+  let highlights = "";
+  if (losses.length) highlights = `⚠️ Biggest losses: ${topLosses}`;
+  if (gains.length && S.prices && Object.keys(S.prices).length) highlights += (highlights ? " | " : "") + `🚀 Best: ${topGains}`;
+  document.getElementById("port-highlights").innerHTML = highlights || "No positions yet";
+  
+  // Age of prices
+  if (S.pricesUpdated) {
+    const mins = Math.floor((Date.now() - S.pricesUpdated) / 60000);
+    document.getElementById("price-age").textContent = mins < 1 ? "Just now" : `${mins}m ago`;
+  } else {
+    document.getElementById("price-age").textContent = "";
+  }
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+// CALENDAR TAB — Earnings for his positions
+// ══════════════════════════════════════════════════════════════════
+async function loadCalendar() {
+  const btn = document.getElementById("cal-refresh-btn");
+  const wrap = document.getElementById("calendar-wrap");
+  if (!S.cfg.finnhubKey) {
+    wrap.innerHTML = '<div class="empty"><div class="ei">🔑</div>Add your Finnhub API key in Settings first.<br><br><button onclick="sw(\'cfg\')" style="background:var(--blue);color:#fff;border:none;border-radius:9px;padding:10px 20px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\',sans-serif;margin-top:8px">Open Settings</button></div>';
+    return;
+  }
+  btn.textContent = "⏳ Loading...";
+  btn.disabled = true;
+  try {
+    const earnings = await fetchEarningsCalendarExpanded();
+    renderCalendar(earnings);
+  } catch(e) {
+    wrap.innerHTML = '<div class="empty"><div class="ei">⚠️</div>Could not fetch earnings. Check API key.</div>';
+  }
+  btn.textContent = "↻ Refresh";
+  btn.disabled = false;
+}
+
+function renderCalendar(earnings) {
+  const wrap = document.getElementById("calendar-wrap");
+  if (!earnings || !earnings.length) {
+    wrap.innerHTML = '<div class="empty"><div class="ei">📅</div>No earnings scheduled in the next 30 days for your positions or competitors.</div>';
+    return;
+  }
+  
+  const pos = buildPos();
+  const today = tod();
+  
+  // Legend at top
+  let html = `<div style="background:var(--card);border:1px solid var(--border);border-radius:11px;padding:11px;margin-bottom:12px;font-size:11px;line-height:1.7">
+    <div style="font-weight:700;color:var(--gold2);margin-bottom:6px">COLOR KEY</div>
+    <div style="display:flex;flex-wrap:wrap;gap:14px">
+      <div><span style="display:inline-block;width:10px;height:10px;background:var(--green2);border-radius:2px;margin-right:5px"></span>You hold this stock</div>
+      <div><span style="display:inline-block;width:10px;height:10px;background:var(--warn2);border-radius:2px;margin-right:5px"></span>Sector competitor (affects your holdings)</div>
+    </div>
+  </div>`;
+  
+  let currentDate = '';
+  
+  for (const e of earnings) {
+    if (e.date !== currentDate) {
+      currentDate = e.date;
+      const daysOut = Math.round((new Date(e.date) - new Date(today)) / 86400000);
+      const label = daysOut === 0 ? 'TODAY' : daysOut === 1 ? 'TOMORROW' : daysOut + ' days';
+      const dateFmt = fmt(e.date);
+      html += `<div style="margin:16px 0 8px 0;display:flex;align-items:center;gap:8px"><div class="sec-lbl" style="margin:0">${dateFmt}</div><div style="font-size:10px;color:var(--gold2);background:rgba(212,160,23,.15);padding:3px 9px;border-radius:20px;font-weight:700">${label}</div></div>`;
+    }
+    
+    const holding = pos[e.ticker];
+    const shares = holding ? holding.shares : 0;
+    const live = S.prices[e.ticker];
+    const price = live ? live.current : (holding?.avg || 0);
+    const posVal = shares * price;
+    const hour = e.hour === 'bmo' ? '🌅 Before Open' : e.hour === 'amc' ? '🌆 After Close' : '📍 During Market';
+    
+    let badgeColor, badgeBg, badgeText, cardBorder, cardBg;
+    
+    if (e.isHolding) {
+      // He holds this stock directly
+      let risk = 'LOW';
+      if (posVal > 50000) risk = 'HIGH';
+      else if (posVal > 20000) risk = 'MEDIUM';
+      badgeText = `📍 YOU HOLD · ${risk} EXPOSURE`;
+      badgeColor = 'var(--green2)';
+      badgeBg = 'rgba(5,150,105,.2)';
+      cardBorder = '1px solid rgba(167,243,208,.3)';
+      cardBg = 'rgba(5,150,105,.05)';
+    } else if (e.affectsHoldings && e.affectsHoldings.length) {
+      // Competitor affects his holdings
+      badgeText = `⚡ WATCH · Affects ${e.affectsHoldings.map(a => a.heldTicker).join(", ")}`;
+      badgeColor = 'var(--warn2)';
+      badgeBg = 'rgba(217,119,6,.2)';
+      cardBorder = '1px solid rgba(253,230,138,.3)';
+      cardBg = 'rgba(217,119,6,.05)';
+    } else {
+      badgeText = 'SECTOR';
+      badgeColor = 'var(--muted)';
+      badgeBg = 'rgba(255,255,255,.05)';
+      cardBorder = '1px solid var(--border)';
+      cardBg = 'var(--card)';
+    }
+    
+    const sectorInfo = e.sector ? `<span style="font-size:10px;color:var(--muted);background:rgba(255,255,255,.05);padding:2px 7px;border-radius:10px;margin-left:6px">${e.sector}</span>` : '';
+    
+    html += `<div style="background:${cardBg};border:${cardBorder};border-radius:13px;padding:13px;margin-bottom:7px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:7px">
+        <div style="flex:1">
+          <div style="display:flex;align-items:center;flex-wrap:wrap">
+            <div style="font-size:18px;font-weight:800;font-family:'Playfair Display',serif">${e.ticker}</div>
+            ${sectorInfo}
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">${hour}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0;margin-left:8px">
+          <div style="font-size:10px;font-weight:700;color:${badgeColor};background:${badgeBg};padding:3px 9px;border-radius:20px;letter-spacing:.03em;white-space:nowrap">${badgeText}</div>
+          ${e.isHolding ? `<div style="font-size:12px;color:var(--white);margin-top:4px">${shares.toLocaleString()} sh · $${(posVal/1000).toFixed(1)}K</div>` : ''}
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);display:flex;gap:12px">
+        ${e.epsEstimate ? `<div>EPS est: <b style="color:var(--white)">$${e.epsEstimate.toFixed(2)}</b></div>` : ''}
+        ${e.revenueEstimate ? `<div>Rev est: <b style="color:var(--white)">$${(e.revenueEstimate/1e9).toFixed(2)}B</b></div>` : ''}
+      </div>
+    </div>`;
+  }
+  
+  wrap.innerHTML = html;
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+// INSIGHTS TAB — Pattern Recognition Deep Dive
+// ══════════════════════════════════════════════════════════════════
+async function runPatternAnalysis() {
+  if (!S.cfg.apiKey) {
+    document.getElementById("insights-wrap").innerHTML = '<div class="empty"><div class="ei">🔑</div>Add your Anthropic API key in Settings first.</div>';
+    return;
+  }
+  
+  const btn = document.getElementById("insights-btn");
+  btn.textContent = "⏳ Analyzing...";
+  btn.disabled = true;
+  document.getElementById("insights-wrap").innerHTML = '<div class="loading"><div class="ring"></div><div class="ltxt">Deep analysis of your 981 trades... this takes 30 seconds</div></div>';
+  
+  // Build comprehensive trade analysis data
+  const trades = S.trades;
+  const stats = computeTradeStats(trades);
+  
+  const prompt = `Analyze these 981 trades from a day trader and find patterns that make money vs lose money. This is serious money analysis - be direct, specific, actionable.
+
+OVERALL STATS:
+- Total trades: ${trades.length}
+- Winning sells: ${stats.winners}, Losing sells: ${stats.losers}
+- Win rate: ${stats.winRate}%
+- Total realized gains: $${stats.totalGains.toLocaleString()}
+- Total realized losses: $${stats.totalLosses.toLocaleString()}
+- Net realized: $${stats.netRealized.toLocaleString()}
+
+BEST PERFORMING TICKERS (by total $ gained):
+${stats.bestTickers.slice(0, 10).map(t => `${t.ticker}: ${t.trades} trades, net $${t.net.toLocaleString()}, win rate ${t.winRate}%`).join('\n')}
+
+WORST PERFORMING TICKERS:
+${stats.worstTickers.slice(0, 10).map(t => `${t.ticker}: ${t.trades} trades, net $${t.net.toLocaleString()}, win rate ${t.winRate}%`).join('\n')}
+
+HOLDING PERIOD ANALYSIS:
+${stats.holdingStats.map(h => `${h.period}: ${h.count} trades, ${h.winRate}% win rate, avg $${h.avgPL.toLocaleString()}`).join('\n')}
+
+TRADE FREQUENCY BY TICKER (top 15):
+${stats.frequentTickers.slice(0, 15).map(t => `${t.ticker}: ${t.count} trades`).join(', ')}
+
+Return ONLY valid JSON with this structure, no markdown:
+{
+  "summary": "2-3 sentence overall assessment in plain English",
+  "what_works": [
+    {"pattern": "Short pattern title", "detail": "Specific plain-English explanation with numbers", "impact": "money impact estimate"}
+  ],
+  "what_loses": [
+    {"pattern": "Short title", "detail": "What's happening and why it loses money", "impact": "dollar amount lost"}
+  ],
+  "top_recommendations": [
+    {"action": "Specific change to make", "reason": "Why", "estimated_value": "$ impact if followed"}
+  ],
+  "dangerous_habits": [
+    "Plain sentence about habit that needs to stop"
+  ],
+  "profit_opportunities": [
+    "Specific ticker or strategy that historically works well"
+  ]
+}
+
+Be BLUNT. This is his money. Give honest analysis. Morris is elderly and English is his second language - plain simple sentences only.`;
+
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        model: "claude-opus-4-7",
+        max_tokens: 3000,
+        messages: [{role: "user", content: prompt}]
+      })
+    });
+    const data = await res.json();
+    const text = data.content?.[0]?.text || '';
+    S.patterns = JSON.parse(text.replace(/```json|```/g, '').trim());
+    S.patternsDate = tod();
+    sv("patterns", S.patterns);
+    sv("patternsDate", tod());
+    renderInsights();
+  } catch(e) {
+    console.log("Pattern analysis failed:", e);
+    document.getElementById("insights-wrap").innerHTML = '<div class="empty"><div class="ei">⚠️</div>Analysis failed. Check API key and try again.</div>';
+  }
+  
+  btn.textContent = "🧠 Analyze";
+  btn.disabled = false;
+}
+
+function computeTradeStats(trades) {
+  const sells = trades.filter(t => t.action === "SELL");
+  const winners = sells.filter(t => t.gain_loss > 0);
+  const losers = sells.filter(t => t.gain_loss < 0);
+  const totalGains = winners.reduce((s,t) => s + t.gain_loss, 0);
+  const totalLosses = losers.reduce((s,t) => s + t.gain_loss, 0);
+  
+  // Per-ticker stats
+  const byTicker = {};
+  for (const t of trades) {
+    if (!byTicker[t.ticker]) byTicker[t.ticker] = {count: 0, net: 0, wins: 0, losses: 0};
+    byTicker[t.ticker].count++;
+    if (t.action === "SELL") {
+      byTicker[t.ticker].net += t.gain_loss;
+      if (t.gain_loss > 0) byTicker[t.ticker].wins++;
+      else if (t.gain_loss < 0) byTicker[t.ticker].losses++;
+    }
+  }
+  const tickerList = Object.entries(byTicker).map(([ticker, s]) => ({
+    ticker,
+    trades: s.count,
+    net: Math.round(s.net),
+    winRate: s.wins + s.losses > 0 ? Math.round((s.wins / (s.wins + s.losses)) * 100) : 0
+  }));
+  
+  // Holding period: match buys to sells by ticker and FIFO
+  const holdings = {};
+  const holdTimes = [];
+  for (const t of trades.slice().sort((a,b) => a.date.localeCompare(b.date))) {
+    if (t.action === "BUY") {
+      if (!holdings[t.ticker]) holdings[t.ticker] = [];
+      holdings[t.ticker].push({date: t.date, shares: t.shares, price: t.price});
+    } else if (t.action === "SELL" && holdings[t.ticker]) {
+      let remaining = t.shares;
+      while (remaining > 0 && holdings[t.ticker].length) {
+        const lot = holdings[t.ticker][0];
+        const take = Math.min(remaining, lot.shares);
+        const days = Math.round((new Date(t.date) - new Date(lot.date)) / 86400000);
+        const pl = take * (t.price - lot.price);
+        holdTimes.push({days, pl, ticker: t.ticker});
+        lot.shares -= take;
+        remaining -= take;
+        if (lot.shares === 0) holdings[t.ticker].shift();
+      }
+    }
+  }
+  
+  // Bucket by holding period
+  const buckets = [
+    {period: "Same day", min: 0, max: 1},
+    {period: "2-5 days", min: 1, max: 6},
+    {period: "1-2 weeks", min: 6, max: 15},
+    {period: "2-4 weeks", min: 15, max: 31},
+    {period: "1-3 months", min: 31, max: 91},
+    {period: "3+ months", min: 91, max: 9999}
+  ];
+  const holdingStats = buckets.map(b => {
+    const inBucket = holdTimes.filter(h => h.days >= b.min && h.days < b.max);
+    const wins = inBucket.filter(h => h.pl > 0).length;
+    const total = inBucket.length;
+    const avgPL = total ? inBucket.reduce((s,h) => s + h.pl, 0) / total : 0;
+    return {
+      period: b.period,
+      count: total,
+      winRate: total ? Math.round((wins/total) * 100) : 0,
+      avgPL: Math.round(avgPL)
+    };
+  });
+  
+  return {
+    winners: winners.length,
+    losers: losers.length,
+    winRate: sells.length ? Math.round((winners.length / sells.length) * 100) : 0,
+    totalGains: Math.round(totalGains),
+    totalLosses: Math.round(totalLosses),
+    netRealized: Math.round(totalGains + totalLosses),
+    bestTickers: tickerList.filter(t => t.net > 0).sort((a,b) => b.net - a.net),
+    worstTickers: tickerList.filter(t => t.net < 0).sort((a,b) => a.net - b.net),
+    frequentTickers: tickerList.sort((a,b) => b.trades - a.trades),
+    holdingStats
+  };
+}
+
+function renderInsights() {
+  const wrap = document.getElementById("insights-wrap");
+  const p = S.patterns;
+  if (!p) return;
+  
+  let html = `<div style="background:linear-gradient(135deg,rgba(26,79,214,.2),rgba(8,145,178,.15));border:1px solid rgba(26,79,214,.3);border-radius:15px;padding:15px 16px;margin-bottom:10px">
+    <div style="font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--gold2);text-transform:uppercase;margin-bottom:8px">Overall Analysis · ${fmt(S.patternsDate)}</div>
+    <div style="font-size:14px;line-height:1.6">${p.summary}</div>
+  </div>`;
+  
+  if (p.what_works?.length) {
+    html += `<div class="sec-lbl">✅ What's Making Money</div>`;
+    for (const w of p.what_works) {
+      html += `<div style="background:rgba(5,150,105,.1);border:1px solid rgba(167,243,208,.25);border-radius:13px;padding:13px;margin-bottom:7px">
+        <div style="font-size:14px;font-weight:800;color:var(--green2);margin-bottom:4px">${w.pattern}</div>
+        <div style="font-size:13px;color:rgba(255,255,255,.85);line-height:1.5">${w.detail}</div>
+        ${w.impact ? `<div style="font-size:11px;color:var(--green2);margin-top:6px;font-weight:700">💰 ${w.impact}</div>` : ''}
+      </div>`;
+    }
+  }
+  
+  if (p.what_loses?.length) {
+    html += `<div class="sec-lbl">❌ What's Losing Money</div>`;
+    for (const w of p.what_loses) {
+      html += `<div style="background:rgba(220,38,38,.1);border:1px solid rgba(252,165,165,.25);border-radius:13px;padding:13px;margin-bottom:7px">
+        <div style="font-size:14px;font-weight:800;color:var(--red2);margin-bottom:4px">${w.pattern}</div>
+        <div style="font-size:13px;color:rgba(255,255,255,.85);line-height:1.5">${w.detail}</div>
+        ${w.impact ? `<div style="font-size:11px;color:var(--red2);margin-top:6px;font-weight:700">💸 ${w.impact}</div>` : ''}
+      </div>`;
+    }
+  }
+  
+  if (p.top_recommendations?.length) {
+    html += `<div class="sec-lbl">💡 Top Recommendations</div>`;
+    for (const r of p.top_recommendations) {
+      html += `<div style="background:rgba(212,160,23,.1);border:1px solid rgba(253,230,138,.25);border-radius:13px;padding:13px;margin-bottom:7px">
+        <div style="font-size:14px;font-weight:800;color:var(--gold2);margin-bottom:4px">${r.action}</div>
+        <div style="font-size:13px;color:rgba(255,255,255,.85);line-height:1.5">${r.reason}</div>
+        ${r.estimated_value ? `<div style="font-size:11px;color:var(--gold2);margin-top:6px;font-weight:700">📈 ${r.estimated_value}</div>` : ''}
+      </div>`;
+    }
+  }
+  
+  if (p.dangerous_habits?.length) {
+    html += `<div class="sec-lbl">⚠️ Dangerous Habits to Stop</div>`;
+    for (const h of p.dangerous_habits) {
+      html += `<div style="background:rgba(220,38,38,.08);border-left:3px solid var(--red2);border-radius:8px;padding:10px 13px;margin-bottom:6px;font-size:13px;color:rgba(255,255,255,.9)">🚫 ${h}</div>`;
+    }
+  }
+  
+  if (p.profit_opportunities?.length) {
+    html += `<div class="sec-lbl">💰 Profit Opportunities</div>`;
+    for (const o of p.profit_opportunities) {
+      html += `<div style="background:rgba(5,150,105,.08);border-left:3px solid var(--green2);border-radius:8px;padding:10px 13px;margin-bottom:6px;font-size:13px;color:rgba(255,255,255,.9)">💎 ${o}</div>`;
+    }
+  }
+  
+  wrap.innerHTML = html;
 }
 
 function renderStats(){
@@ -792,6 +1614,7 @@ function renderStats(){
 }
 
 function renderDash(){
+  renderPortfolio();
   const aw=document.getElementById("alerts-wrap"), lw=document.getElementById("locks-wrap");
   aw.innerHTML=""; lw.innerHTML="";
   const today=tod();
@@ -829,7 +1652,10 @@ function renderDash(){
     }
   }
   const has=relevantConflicts.length>0||active.length>0;
-  document.getElementById("dash-empty").style.display=has?"none":"block";
+  const noData = S.trades.length === 0;
+  document.getElementById("dash-empty").style.display=(noData||has)?"none":"block";
+  const noDataEl = document.getElementById("dash-no-data");
+  if (noDataEl) noDataEl.style.display=noData?"block":"none";
 }
 
 function renderBrief(){
@@ -842,7 +1668,24 @@ function renderBrief(){
   let news="";
   for(const n of (b.news||[])) {
     const priceTag = n.price ? `<span style="font-size:11px;color:var(--gold2);font-weight:700;margin-left:6px">$${parseFloat(n.price).toFixed(2)}</span>` : "";
-    news+=`<div class="news-item"><div class="ni">${ii[n.impact]||"➡️"}</div><div style="flex:1"><div class="nt">${n.ticker}${priceTag}</div><div class="nb">${n.summary}</div></div></div>`;
+    const isHolding = n.is_holding !== false;  // default true for backwards compat
+    const affects = n.affects && n.affects.length ? n.affects : null;
+    
+    let badge = "";
+    let borderColor = "var(--border)";
+    let bgColor = "var(--card)";
+    
+    if (isHolding) {
+      badge = '<span style="font-size:9px;font-weight:800;color:var(--green2);background:rgba(5,150,105,.2);padding:2px 7px;border-radius:10px;margin-left:6px;letter-spacing:.04em">YOU HOLD</span>';
+      borderColor = "rgba(167,243,208,.25)";
+      bgColor = "rgba(5,150,105,.05)";
+    } else if (affects) {
+      badge = `<span style="font-size:9px;font-weight:800;color:var(--warn2);background:rgba(217,119,6,.2);padding:2px 7px;border-radius:10px;margin-left:6px;letter-spacing:.04em">AFFECTS ${affects.join(", ")}</span>`;
+      borderColor = "rgba(253,230,138,.3)";
+      bgColor = "rgba(217,119,6,.05)";
+    }
+    
+    news += `<div class="news-item" style="border-color:${borderColor};background:${bgColor}"><div class="ni">${ii[n.impact]||"➡️"}</div><div style="flex:1"><div class="nt" style="display:flex;align-items:center;flex-wrap:wrap">${n.ticker}${priceTag}${badge}</div><div class="nb">${n.summary}</div></div></div>`;
   }
   let trades="";
   for(const t of (mdata.trades||[])){
@@ -863,6 +1706,293 @@ function renderTrades(){
     d.innerHTML=`<div class="tbadge ${ac}">${t.action}</div><div style="flex:1;min-width:0"><div class="tname">${t.ticker}</div><div class="tmeta">${t.shares} sh @ $${parseFloat(t.price||0).toFixed(2)} · ${fmt(t.date)}</div>${ic?'<div class="tflag">⚠️ Wash sale</div>':""}</div><div class="tright"><div class="ttot">$${parseFloat(tot).toLocaleString("en-US",{maximumFractionDigits:0})}</div>${t.action==="SELL"&&gl!==0?`<div class="tgl ${gl<0?"loss":"gain"}">${gl<0?"▼":"▲"} $${Math.abs(gl).toLocaleString()}</div>`:""}</div>`;
     el.appendChild(d);
   }
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+// CHECK TRADE - Advanced with simulator + smart tax preview
+// ══════════════════════════════════════════════════════════════════
+function updateCheckFields() {
+  // Could add conditional UI here in future
+}
+
+async function checkTradeAdvanced() {
+  const ticker = document.getElementById("c-ticker").value.trim().toUpperCase();
+  const action = document.getElementById("c-action").value;
+  const shares = parseFloat(document.getElementById("c-shares").value) || 0;
+  const price = parseFloat(document.getElementById("c-price").value) || 0;
+  const el = document.getElementById("c-result");
+  
+  if (!ticker) { el.innerHTML = ""; return; }
+  
+  el.className = "c-result";
+  el.innerHTML = '<div style="text-align:center;padding:20px"><div class="ring" style="margin:0 auto 10px"></div><div style="color:var(--muted);font-size:12px">Running full analysis...</div></div>';
+  el.style.background = "var(--card)";
+  el.style.border = "1px solid var(--border)";
+  el.style.color = "var(--white)";
+  
+  // Step 1: Wash sale check
+  const warnings = checkConflict(ticker, action);
+  
+  // Step 2: Get current/live price
+  let currentPrice = price;
+  if (!currentPrice && S.prices[ticker]) currentPrice = S.prices[ticker].current;
+  
+  // Step 3: Run simulator and tax preview in parallel
+  const [simulation, taxPreview, alternatives] = await Promise.all([
+    action === "BUY" ? runBacktestSimulation(ticker, shares || 100, currentPrice) : null,
+    action === "SELL" ? runTaxPreview(ticker, shares, currentPrice) : null,
+    warnings.length > 0 ? getAlternatives(ticker, action) : null
+  ]);
+  
+  // Build complete result HTML
+  let html = '';
+  
+  // WARNINGS SECTION
+  if (warnings.length > 0) {
+    html += '<div style="background:rgba(220,38,38,.12);border:1px solid rgba(252,165,165,.3);border-radius:12px;padding:14px;margin-bottom:10px">';
+    html += '<div style="font-size:14px;font-weight:800;color:var(--red2);margin-bottom:6px">⚠️ WASH SALE WARNING</div>';
+    for (const w of warnings) {
+      html += `<div style="font-size:13px;color:rgba(255,255,255,.85);margin-bottom:8px">${w.msg}</div>`;
+      if (w.tax) html += `<div style="font-size:13px;font-weight:700;color:var(--red2);margin-bottom:4px">Extra tax: $${w.tax.toLocaleString("en-US",{maximumFractionDigits:0})}</div>`;
+      if (w.safe) html += `<div style="font-size:12px;color:rgba(255,255,255,.6)">✅ Safe to ${action} after: <b>${fmt(w.safe)}</b></div>`;
+    }
+    html += '</div>';
+    
+    // Alternatives
+    if (alternatives && alternatives.length) {
+      html += '<div style="margin-bottom:10px"><div style="font-size:12px;font-weight:700;color:var(--gold2);letter-spacing:.05em;text-transform:uppercase;margin-bottom:10px">✅ Safe Alternatives — Stay in the Market</div>';
+      for (const a of alternatives.slice(0,3)) {
+        html += `<div style="background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:11px;padding:11px 13px;margin-bottom:7px;display:flex;align-items:center;gap:12px">
+          <div style="font-size:17px;font-weight:800;font-family:'Playfair Display',serif;color:var(--gold2);min-width:52px">${a.ticker}</div>
+          <div style="flex:1"><div style="font-size:12px;color:rgba(255,255,255,.8);line-height:1.4">${a.reason}</div><div style="font-size:10px;color:var(--muted);margin-top:2px;font-weight:600">${a.sector}</div></div>
+          <div style="font-size:10px;background:rgba(5,150,105,.2);color:var(--green2);padding:3px 8px;border-radius:20px;font-weight:700">SAFE</div>
+        </div>`;
+      }
+      html += '</div>';
+    }
+  } else {
+    html += '<div style="background:rgba(5,150,105,.15);border:1px solid rgba(167,243,208,.3);border-radius:12px;padding:14px;margin-bottom:10px;color:var(--green2)"><b>✅ No wash sale conflicts.</b> Safe to proceed.</div>';
+  }
+  
+  // SIMULATION (for BUYs)
+  if (simulation) {
+    html += renderSimulation(simulation, ticker);
+  }
+  
+  // TAX PREVIEW (for SELLs)
+  if (taxPreview) {
+    html += renderTaxPreview(taxPreview, ticker, shares);
+  }
+  
+  el.innerHTML = html;
+  el.style.color = "var(--white)";
+}
+
+async function runBacktestSimulation(ticker, shares, currentPrice) {
+  if (!S.cfg.finnhubKey) return null;
+  const history = await fetchHistoricalPrices(ticker, 365);
+  if (!history || history.length < 30) return null;
+  
+  // Simulate: bought at each day in last 12 months, sold 5/10/30 days later
+  const scenarios = [];
+  const holdPeriods = [5, 10, 30];
+  
+  for (const days of holdPeriods) {
+    let wins = 0, losses = 0, totalReturn = 0;
+    const samples = [];
+    
+    for (let i = 0; i < history.length - days; i++) {
+      const buy = history[i];
+      const sell = history[i + days];
+      if (!buy || !sell) continue;
+      const ret = ((sell.close - buy.close) / buy.close) * 100;
+      if (ret > 0) wins++; else losses++;
+      totalReturn += ret;
+      samples.push(ret);
+    }
+    
+    const total = wins + losses;
+    const avgReturn = total ? totalReturn / total : 0;
+    samples.sort((a,b) => a - b);
+    const bestCase = samples[Math.floor(samples.length * 0.9)];
+    const worstCase = samples[Math.floor(samples.length * 0.1)];
+    
+    scenarios.push({
+      days,
+      winRate: total ? Math.round((wins/total)*100) : 0,
+      avgReturn: avgReturn.toFixed(2),
+      bestCase: bestCase?.toFixed(1),
+      worstCase: worstCase?.toFixed(1),
+      samples: total
+    });
+  }
+  
+  return { scenarios, currentPrice, shares };
+}
+
+function renderSimulation(sim, ticker) {
+  const invested = sim.shares * sim.currentPrice;
+  let html = '<div style="background:rgba(26,79,214,.1);border:1px solid rgba(26,79,214,.25);border-radius:12px;padding:14px;margin-bottom:10px">';
+  html += `<div style="font-size:13px;font-weight:800;color:#93c5fd;margin-bottom:10px">📊 What Would Have Happened — Backtest ${ticker}</div>`;
+  html += `<div style="font-size:11px;color:var(--muted);margin-bottom:10px">If you had done this exact trade at random times in the last 12 months:</div>`;
+  
+  for (const s of sim.scenarios) {
+    const dollarAvg = invested * (parseFloat(s.avgReturn) / 100);
+    const color = parseFloat(s.avgReturn) >= 0 ? 'var(--green2)' : 'var(--red2)';
+    const emoji = s.winRate >= 60 ? '🟢' : s.winRate >= 45 ? '🟡' : '🔴';
+    html += `<div style="background:rgba(0,0,0,.2);border-radius:9px;padding:10px;margin-bottom:6px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <div style="font-size:13px;font-weight:700">${emoji} Hold ${s.days} days</div>
+        <div style="font-size:16px;font-weight:800;font-family:'Playfair Display',serif;color:${color}">${parseFloat(s.avgReturn) >= 0 ? '+' : ''}${s.avgReturn}%</div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:11px;color:var(--muted)">
+        <div>Win rate: <b style="color:var(--white)">${s.winRate}%</b></div>
+        <div>Best: <b style="color:var(--green2)">+${s.bestCase}%</b></div>
+        <div>Worst: <b style="color:var(--red2)">${s.worstCase}%</b></div>
+      </div>
+      <div style="margin-top:6px;font-size:11px;color:var(--muted)">Avg result: $${dollarAvg >= 0 ? '+' : ''}${dollarAvg.toLocaleString("en-US",{maximumFractionDigits:0})} on $${invested.toLocaleString("en-US",{maximumFractionDigits:0})}</div>
+    </div>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+async function runTaxPreview(ticker, shares, sellPrice) {
+  // Find all BUY lots of this ticker
+  const buys = S.trades
+    .filter(t => t.ticker === ticker && t.action === "BUY")
+    .sort((a,b) => a.date.localeCompare(b.date));
+  
+  if (!buys.length || !shares) return null;
+  
+  // Calculate FIFO, LIFO, and Best (lowest tax)
+  const today = tod();
+  
+  const calcMethod = (method, lots) => {
+    let remaining = shares;
+    let totalCost = 0;
+    let stGain = 0;  // Short-term
+    let ltGain = 0;  // Long-term
+    const usedLots = [];
+    
+    for (const lot of lots) {
+      if (remaining <= 0) break;
+      const take = Math.min(remaining, lot.shares);
+      const cost = take * lot.price;
+      const proceeds = take * sellPrice;
+      const gain = proceeds - cost;
+      const daysHeld = Math.round((new Date(today) - new Date(lot.date)) / 86400000);
+      const isLT = daysHeld > 365;
+      
+      if (isLT) ltGain += gain;
+      else stGain += gain;
+      
+      totalCost += cost;
+      usedLots.push({date: lot.date, shares: take, price: lot.price, daysHeld, isLT, gain});
+      remaining -= take;
+    }
+    
+    const bracket = S.cfg.bracket || 37;
+    const ltcgRate = S.cfg.ltcg !== undefined ? S.cfg.ltcg : 20;
+    const stTax = stGain > 0 ? stGain * (bracket/100) : 0;
+    const ltTax = ltGain > 0 ? ltGain * (ltcgRate/100) : 0;
+    const totalTax = stTax + ltTax;
+    const netProceeds = (shares * sellPrice) - totalTax;
+    
+    return {
+      method,
+      totalCost,
+      stGain,
+      ltGain,
+      stTax,
+      ltTax,
+      totalTax,
+      netProceeds,
+      usedLots
+    };
+  };
+  
+  // FIFO - oldest first
+  const fifoLots = buys.map(b => ({...b}));
+  const fifo = calcMethod("FIFO", fifoLots);
+  
+  // LIFO - newest first
+  const lifoLots = buys.map(b => ({...b})).reverse();
+  const lifo = calcMethod("LIFO", lifoLots);
+  
+  // Optimal - lowest tax (prefer long-term losses, then long-term gains, then short-term losses, then short-term gains)
+  const today2 = new Date(today);
+  const scoreLot = lot => {
+    const daysHeld = Math.round((today2 - new Date(lot.date)) / 86400000);
+    const isLT = daysHeld > 365;
+    const potentialGain = (sellPrice - lot.price);
+    // Prefer: LT losses, ST losses, LT gains, ST gains
+    if (isLT && potentialGain < 0) return 1;
+    if (!isLT && potentialGain < 0) return 2;
+    if (isLT && potentialGain >= 0) return 3;
+    return 4;
+  };
+  const smartLots = buys.map(b => ({...b})).sort((a,b) => scoreLot(a) - scoreLot(b));
+  const smart = calcMethod("Smart Lot", smartLots);
+  
+  const proceeds = shares * sellPrice;
+  
+  return {
+    ticker,
+    shares,
+    sellPrice,
+    proceeds,
+    fifo,
+    lifo,
+    smart,
+    bracket: S.cfg.bracket || 37,
+    ltcg: S.cfg.ltcg !== undefined ? S.cfg.ltcg : 20
+  };
+}
+
+function renderTaxPreview(tp, ticker, shares) {
+  const savings = tp.fifo.totalTax - tp.smart.totalTax;
+  const bestMethod = [tp.fifo, tp.lifo, tp.smart].sort((a,b) => a.totalTax - b.totalTax)[0];
+  
+  let html = '<div style="background:rgba(212,160,23,.08);border:1px solid rgba(253,230,138,.25);border-radius:12px;padding:14px;margin-bottom:10px">';
+  html += `<div style="font-size:13px;font-weight:800;color:var(--gold2);margin-bottom:10px">💰 Smart Tax Preview — ${shares} shares of ${ticker}</div>`;
+  html += `<div style="font-size:11px;color:var(--muted);margin-bottom:12px">Proceeds: $${tp.proceeds.toLocaleString("en-US",{maximumFractionDigits:0})} · Your bracket: ${tp.bracket}% · LTCG: ${tp.ltcg}%</div>`;
+  
+  const methods = [
+    {label: "FIFO (Default)", data: tp.fifo, note: "Sells oldest shares first"},
+    {label: "LIFO", data: tp.lifo, note: "Sells newest shares first"},
+    {label: "Smart Lot ⭐", data: tp.smart, note: "Optimal lot selection for lowest tax"}
+  ];
+  
+  for (const m of methods) {
+    const isBest = m.data.totalTax === bestMethod.totalTax;
+    const bg = isBest ? "rgba(5,150,105,.15)" : "rgba(0,0,0,.2)";
+    const border = isBest ? "1px solid rgba(167,243,208,.4)" : "1px solid transparent";
+    html += `<div style="background:${bg};border:${border};border-radius:9px;padding:10px;margin-bottom:6px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="font-size:13px;font-weight:800">${m.label}${isBest ? ' <span style="color:var(--green2);font-size:10px">← BEST</span>' : ''}</div>
+        <div style="font-size:15px;font-weight:800;font-family:'Playfair Display',serif;color:var(--red2)">-$${m.data.totalTax.toLocaleString("en-US",{maximumFractionDigits:0})}</div>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:6px">${m.note}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px">
+        <div>ST gain: <b style="color:${m.data.stGain >= 0 ? 'var(--green2)' : 'var(--red2)'}">$${m.data.stGain.toLocaleString("en-US",{maximumFractionDigits:0})}</b></div>
+        <div>LT gain: <b style="color:${m.data.ltGain >= 0 ? 'var(--green2)' : 'var(--red2)'}">$${m.data.ltGain.toLocaleString("en-US",{maximumFractionDigits:0})}</b></div>
+        <div>ST tax: <b>-$${m.data.stTax.toLocaleString("en-US",{maximumFractionDigits:0})}</b></div>
+        <div>LT tax: <b>-$${m.data.ltTax.toLocaleString("en-US",{maximumFractionDigits:0})}</b></div>
+      </div>
+      <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.08);font-size:12px;font-weight:700;color:var(--green2)">Net after tax: $${m.data.netProceeds.toLocaleString("en-US",{maximumFractionDigits:0})}</div>
+    </div>`;
+  }
+  
+  if (savings > 100) {
+    html += `<div style="margin-top:8px;background:rgba(5,150,105,.15);border-radius:9px;padding:10px;font-size:12px;color:var(--green2);text-align:center">
+      <b>💡 Smart Lot saves you $${savings.toLocaleString("en-US",{maximumFractionDigits:0})}</b> vs FIFO default. Call Schwab and specify lots.
+    </div>`;
+  }
+  
+  html += '</div>';
+  return html;
 }
 
 // ── CHECK TRADE + AI ALTERNATIVES ─────────────────────────────────
@@ -914,7 +2044,7 @@ Suggest 3 alternative stocks or ETFs he can buy RIGHT NOW instead of ${ticker}. 
 Return ONLY valid JSON array, no markdown:
 [{"ticker":"NVDA","reason":"One short plain sentence why this works","sector":"Chips","price":201.50},{"ticker":"SOXX","reason":"...","sector":"ETF","price":184.20},{"ticker":"INTC","reason":"...","sector":"Chips","price":21.30}]`;
 
-    const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:400,messages:[{role:"user",content:prompt}]})});
+    const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-opus-4-7",max_tokens:400,messages:[{role:"user",content:prompt}]})});
     const data=await res.json();
     const text=data.content?.[0]?.text||"";
     const parsed=JSON.parse(text.replace(/```json|```/g,"").trim());
@@ -960,17 +2090,42 @@ function addManual(){
 }
 
 async function refreshAll(){
-  const ic=document.getElementById("rico"); ic.style.animation="spin .5s linear infinite";
-  computeWS(); renderDash(); renderTrades(); renderStats();
+  const ic = document.getElementById("rico");
+  ic.style.animation = "spin .5s linear infinite";
+  
+  // Fetch live prices in parallel with brief
+  const tasks = [];
+  if (S.cfg.finnhubKey) tasks.push(fetchLivePrices());
+  
+  computeWS();
+  
+  // Wait for prices to update the dashboard
+  if (tasks.length) await Promise.all(tasks);
+  
+  renderDash();
+  renderTrades();
+  renderStats();
   await genBrief();
-  ic.style.animation="";
+  
+  ic.style.animation = "";
 }
 
 function saveCfg(){
-  S.cfg={apiKey:document.getElementById("cfg-api").value.trim(),email1:document.getElementById("cfg-e1").value.trim(),email2:document.getElementById("cfg-e2").value.trim()};
-  sv("cfg",S.cfg);
-  const ok=document.getElementById("cfg-ok"); ok.style.display="block";
-  setTimeout(()=>ok.style.display="none",2000);
+  S.cfg = {
+    apiKey: document.getElementById("cfg-api").value.trim(),
+    finnhubKey: document.getElementById("cfg-finnhub").value.trim(),
+    email1: document.getElementById("cfg-e1").value.trim(),
+    email2: document.getElementById("cfg-e2").value.trim(),
+    bracket: parseFloat(document.getElementById("cfg-bracket").value),
+    ltcg: parseFloat(document.getElementById("cfg-ltcg").value),
+    state: document.getElementById("cfg-state").value,
+    // Preserve existing gmail token
+    gmail: S.cfg.gmail
+  };
+  sv("cfg", S.cfg);
+  const ok = document.getElementById("cfg-ok");
+  ok.style.display = "block";
+  setTimeout(() => ok.style.display = "none", 2000);
 }
 
 // ── NAV ────────────────────────────────────────────────────────────
@@ -982,7 +2137,13 @@ function sw(tab){
 }
 
 // ── BOOT ───────────────────────────────────────────────────────────
+const APP_VERSION = "2.0-opus47-2026-04-18";
+
 window.addEventListener("load",()=>{
+  console.log("Morris Trader", APP_VERSION);
+  // Fallback setup button handler
+  const btn = document.getElementById("setup-go-btn");
+  if (btn) btn.addEventListener("click", doSetup);
   // Check if returning from Gmail OAuth
   const newToken = checkGmailCallback();
   
