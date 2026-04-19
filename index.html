@@ -228,7 +228,8 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
         <button class="mode-btn active" id="mb-moderate" onclick="setMode('moderate')"><span class="mi">⚖️</span>Balanced</button>
         <button class="mode-btn" id="mb-active" onclick="setMode('active')"><span class="mi">🚀</span>Active</button>
       </div>
-      <div id="brief-wrap"><div class="loading"><div class="ring"></div><div class="ltxt">Generating morning brief...</div></div></div>
+      <button onclick="genBrief()" style="width:100%;padding:13px;background:linear-gradient(135deg,var(--blue),var(--teal));border:none;border-radius:11px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;margin-bottom:10px">🌅 Generate Fresh Brief</button>
+      <div id="brief-wrap"><div class="empty"><div class="ei">🌅</div>Tap Generate Fresh Brief above for your trading plan.</div></div>
     </div>
 
     <div class="tab" id="tab-check">
@@ -340,6 +341,9 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
         <div class="cfg-f"><label class="cfg-lbl">Morris Email</label><input class="cfg-inp" id="cfg-e1" type="email"></div>
         <div class="cfg-f"><label class="cfg-lbl">Brother Email</label><input class="cfg-inp" id="cfg-e2" type="email"></div>
         <button class="cfg-save" onclick="saveCfg()">Save All Settings</button>
+        <button onclick="testAPIKey()" style="width:100%;padding:11px;background:rgba(26,79,214,.2);border:1px solid rgba(26,79,214,.3);color:#93c5fd;border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;margin-top:8px">🧪 Test Anthropic API Key</button>
+        <div id="cfg-ok" style="display:none;text-align:center;color:var(--green2);margin-top:9px;font-weight:700;font-size:14px">✓ Saved</div>
+        <div id="api-test-result" style="margin-top:10px;font-size:12px;padding:0"></div>
       </div>
 
       <div class="cfg-card">
@@ -826,12 +830,9 @@ async function init(){
   // Check Gmail connection status
   updateGmailStatus();
 
-  // Show saved brief — he controls when to regenerate for fresh data
+  // Show saved brief — he controls when to regenerate
   if(S.brief){
     renderBrief();
-  } else if(S.cfg.apiKey){
-    // First time — auto-generate
-    await genBrief();
   }
 }
 
@@ -913,7 +914,12 @@ function getTimeContext() {
 }
 
 async function genBrief(){
-  if(!S.cfg.apiKey) return;
+  // Refresh cfg from localStorage in case it was updated
+  S.cfg = ld("cfg", S.cfg);
+  if (!S.cfg.apiKey) {
+    document.getElementById("brief-wrap").innerHTML = '<div class="empty"><div class="ei">🔑</div>Add your Anthropic API key in Settings first.</div>';
+    return;
+  }
   
   const ctx = getTimeContext();
   const loadMsg = {
@@ -1029,7 +1035,12 @@ Rules:
     renderBrief();
   }catch(e){
     console.log("Brief error:", e);
-    document.getElementById("brief-wrap").innerHTML='<div class="empty"><div class="ei">⚠️</div>Could not generate brief. Check API key in Settings.</div>';
+    const errMsg = e.message || e.toString();
+    const hint = errMsg.includes("CORS") ? "CORS issue — the headers need fixing. " :
+                 errMsg.includes("401") ? "API key rejected. Check key in Settings. " :
+                 errMsg.includes("429") ? "Rate limited. Wait 1 minute. " :
+                 errMsg.includes("Failed to fetch") ? "Network/API issue. " : "";
+    document.getElementById("brief-wrap").innerHTML = `<div class="empty"><div class="ei">⚠️</div>Brief failed.<br><br><div style="font-size:12px;color:var(--red2);padding:10px;background:rgba(220,38,38,.1);border-radius:8px;margin:10px 0;max-width:400px;text-align:left;word-break:break-word">${hint}${errMsg}</div><button onclick="genBrief()" style="margin-top:10px;padding:10px 20px;background:var(--blue);color:#fff;border:none;border-radius:8px;font-weight:700;cursor:pointer">Retry</button></div>`;
   }
 }
 
@@ -1126,6 +1137,42 @@ function buildPos(){
 }
 
 // ── RENDER ─────────────────────────────────────────────────────────
+
+async function testAPIKey() {
+  const result = document.getElementById("api-test-result");
+  if (!S.cfg.apiKey) {
+    result.innerHTML = '<div style="padding:10px;background:rgba(220,38,38,.1);border-radius:8px;color:var(--red2)">❌ No API key saved. Paste it above and Save first.</div>';
+    return;
+  }
+  result.innerHTML = '<div style="padding:10px;background:rgba(26,79,214,.1);border-radius:8px;color:#93c5fd">⏳ Testing...</div>';
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": S.cfg.apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true"
+      },
+      body: JSON.stringify({
+        model: "claude-opus-4-7",
+        max_tokens: 50,
+        messages: [{role: "user", content: "Say hi in 3 words"}]
+      })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const text = data.content?.[0]?.text || "no response";
+      result.innerHTML = `<div style="padding:10px;background:rgba(5,150,105,.15);border-radius:8px;color:var(--green2)"><b>✅ API works!</b><br>Response: "${text}"</div>`;
+    } else {
+      const err = await res.text();
+      result.innerHTML = `<div style="padding:10px;background:rgba(220,38,38,.1);border-radius:8px;color:var(--red2)"><b>❌ API error (${res.status})</b><br><div style="font-size:11px;margin-top:6px;word-break:break-word">${err.substring(0,300)}</div></div>`;
+    }
+  } catch(e) {
+    result.innerHTML = `<div style="padding:10px;background:rgba(220,38,38,.1);border-radius:8px;color:var(--red2)"><b>❌ Network error</b><br><div style="font-size:11px;margin-top:6px">${e.message}</div></div>`;
+  }
+}
+
 function exportTrades() {
   const data = {
     trades: S.trades,
@@ -1377,6 +1424,7 @@ function renderCalendar(earnings) {
 // INSIGHTS TAB — Pattern Recognition Deep Dive
 // ══════════════════════════════════════════════════════════════════
 async function runPatternAnalysis() {
+  S.cfg = ld("cfg", S.cfg);
   if (!S.cfg.apiKey) {
     document.getElementById("insights-wrap").innerHTML = '<div class="empty"><div class="ei">🔑</div>Add your Anthropic API key in Settings first.</div>';
     return;
@@ -2090,6 +2138,7 @@ function addManual(){
 }
 
 async function refreshAll(){
+  S.cfg = ld("cfg", S.cfg);  // Refresh config from localStorage
   const ic = document.getElementById("rico");
   ic.style.animation = "spin .5s linear infinite";
   
@@ -2105,8 +2154,7 @@ async function refreshAll(){
   renderDash();
   renderTrades();
   renderStats();
-  await genBrief();
-  
+  // Don't auto-generate brief on refresh — user taps Generate button instead
   ic.style.animation = "";
 }
 
@@ -2132,8 +2180,12 @@ function saveCfg(){
 function sw(tab){
   document.querySelectorAll(".tab").forEach(t=>t.classList.remove("active"));
   document.querySelectorAll(".ni2").forEach(n=>n.classList.remove("active"));
-  document.getElementById("tab-"+tab).classList.add("active");
-  document.getElementById("nb-"+tab).classList.add("active");
+  const tabEl = document.getElementById("tab-"+tab);
+  if (tabEl) tabEl.classList.add("active");
+  const navEl = document.getElementById("nb-"+tab);
+  if (navEl) navEl.classList.add("active");
+  // Scroll to top on tab change
+  window.scrollTo(0,0);
 }
 
 // ── BOOT ───────────────────────────────────────────────────────────
