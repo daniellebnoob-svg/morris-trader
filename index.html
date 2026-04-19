@@ -1013,7 +1013,7 @@ Rules:
   try{
     const res=await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",
-      headers:{"Content-Type":"application/json"},
+      headers:{"Content-Type":"application/json","x-api-key":S.cfg.apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
       body:JSON.stringify({
         model:"claude-opus-4-7",
         max_tokens:2000,
@@ -1047,7 +1047,7 @@ Body: ${body.substring(0, 3000)}`;
 
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: {'Content-Type': 'application/json', 'x-api-key': S.cfg.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true'},
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 1000,
@@ -1438,7 +1438,7 @@ Be BLUNT. This is his money. Give honest analysis. Morris is elderly and English
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: {"Content-Type": "application/json"},
+      headers: {"Content-Type": "application/json", "x-api-key": S.cfg.apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true"},
       body: JSON.stringify({
         model: "claude-opus-4-7",
         max_tokens: 3000,
@@ -2044,7 +2044,7 @@ Suggest 3 alternative stocks or ETFs he can buy RIGHT NOW instead of ${ticker}. 
 Return ONLY valid JSON array, no markdown:
 [{"ticker":"NVDA","reason":"One short plain sentence why this works","sector":"Chips","price":201.50},{"ticker":"SOXX","reason":"...","sector":"ETF","price":184.20},{"ticker":"INTC","reason":"...","sector":"Chips","price":21.30}]`;
 
-    const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-opus-4-7",max_tokens:400,messages:[{role:"user",content:prompt}]})});
+    const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":S.cfg.apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-opus-4-7",max_tokens:400,messages:[{role:"user",content:prompt}]})});
     const data=await res.json();
     const text=data.content?.[0]?.text||"";
     const parsed=JSON.parse(text.replace(/```json|```/g,"").trim());
