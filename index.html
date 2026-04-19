@@ -210,6 +210,10 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
         </div>
         <div class="pgn" id="port-highlights">Loading live data...</div>
       </div>
+      <div id="playbook-card" style="display:none;background:linear-gradient(135deg,rgba(212,160,23,.15),rgba(217,119,6,.08));border:1px solid rgba(253,230,138,.3);border-radius:15px;padding:14px 16px;margin-top:10px;margin-bottom:4px">
+        <div style="font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--gold2);text-transform:uppercase;margin-bottom:10px">📋 Today's Playbook</div>
+        <div id="playbook-content"></div>
+      </div>
       <div id="alerts-wrap"></div>
       <div id="locks-wrap"></div>
       <div id="dash-empty" style="display:none" class="empty"><div class="ei">✅</div>No conflicts today. All clean.</div>
@@ -236,7 +240,7 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
       <div class="sec-lbl">Check Before You Trade</div>
       <div class="check-card">
         <div class="check-row">
-          <input class="c-input" id="c-ticker" placeholder="Ticker e.g. AMD" maxlength="6" oninput="this.value=this.value.toUpperCase()">
+          <input class="c-input" id="c-ticker" placeholder="Ticker e.g. AMD" maxlength="6" oninput="this.value=this.value.toUpperCase();autofillCheckPrice()">
           <select class="c-sel" id="c-action" onchange="updateCheckFields()">
             <option value="BUY">BUY</option>
             <option value="SELL">SELL</option>
@@ -385,10 +389,7 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
         3. Tap <b>"Add to Home Screen"</b><br>
         4. Tap Add — done. Opens like a real app.<br><br>
         <b>How alerts work:</b><br>
-        Morris's Schwab trade notifications forward to Danielle's personal Gmail (danielle.bercovitch@gmail.com). Wash sale alerts email Danielle immediately. Morris sees conflicts here when he opens the app.<br><br>
-        <b>Trade data:</b><br>
-        All 981 trades from Oct 2025–Apr 2026 are pre-loaded. New trades can be added manually using the + Add button in the Trades tab, or will be auto-imported once Gmail is connected.
-      </div>
+        Your Schwab trade notifications forward to danielle.gabbay@gmail.com. The app reads them automatically. Wash sale alerts notify Danielle. You see conflicts here when you open the app.</div>
     </div>
   </div>
 </div>
@@ -1198,6 +1199,7 @@ async function testAPIKey() {
       body: JSON.stringify({
         model: "claude-opus-4-7",
         max_tokens: 50,
+        system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader.",
         messages: [{role: "user", content: "Say hi in 3 words"}]
       })
     });
@@ -1557,7 +1559,11 @@ Return ONLY valid JSON with this structure, no markdown:
 RULES:
 - For ANY "what_works" pattern involving short holds (days to weeks), set wash_risk: true and explicitly explain in detail that it only works when rotating between DIFFERENT stocks, never the same one within 30 days
 - In "dangerous_habits" - the #1 habit to flag is triggering wash sales by rebuying same ticker within 30 days
-- In "missed_opportunities" - analyze his trade history for stocks he SOLD EARLY that then ran up big, or stocks he BOUGHT and LOST on that would have been profitable if held longer
+- "missed_opportunities" is REQUIRED — you MUST return at least 3-5 entries. Analyze the trade history carefully for:
+  * Stocks sold EARLY that then ran up significantly after
+  * Stocks where losses were taken but would have recovered if held
+  * Sectors not currently held that the trading pattern suggests should be explored (e.g., if many semiconductor trades but no AI software exposure)
+  * Stocks with frequent trading but small/no profit — would buying once and holding have worked better?
 - Be BLUNT, direct, use "you/your" NEVER "him/he/his". English is your second language — plain simple sentences only.
 - If a best-performing ticker shows 15+ trades, flag that this volume on one stock is what creates wash sales
 - NEVER use words like "for him", "his holdings", "him", "he". Always say "you", "your stocks", "your holdings"`;
@@ -1569,6 +1575,7 @@ RULES:
       body: JSON.stringify({
         model: "claude-opus-4-7",
         max_tokens: 3000,
+        system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader.",
         messages: [{role: "user", content: prompt}]
       })
     });
@@ -1777,8 +1784,94 @@ function renderStats(){
   lv.textContent=l; tv.textContent=S.trades.length;
 }
 
+
+function renderPlaybook() {
+  const card = document.getElementById("playbook-card");
+  const content = document.getElementById("playbook-content");
+  if (!card || !content) return;
+  
+  const today = tod();
+  const items = [];
+  
+  // Item 1: Active wash sale lockouts about to expire (3 day warning)
+  const expiringSoon = Object.entries(S.lockouts)
+    .filter(([t, d]) => d >= today && dbet(today, d) <= 5)
+    .map(([t, d]) => ({ticker: t, date: d, days: dbet(today, d)}));
+  if (expiringSoon.length > 0) {
+    for (const e of expiringSoon.slice(0, 2)) {
+      items.push({
+        icon: "🔓",
+        text: `<b>${e.ticker}</b> unlocks in ${e.days} day${e.days !== 1 ? "s" : ""} (${fmt(e.date)}) — safe to rebuy after this date`
+      });
+    }
+  }
+  
+  // Item 2: Earnings this week for holdings
+  const thisWeek = (S.earnings || []).filter(e => e.isHolding && dbet(today, e.date) <= 7);
+  if (thisWeek.length > 0) {
+    const tickers = thisWeek.map(e => e.ticker).slice(0, 3).join(", ");
+    items.push({
+      icon: "📅",
+      text: `Earnings this week for your holdings: <b>${tickers}</b> — consider tightening stops`
+    });
+  }
+  
+  // Item 3: Competitor earnings that affect holdings
+  const compEarnings = (S.earnings || []).filter(e => !e.isHolding && e.affectsHoldings?.length && dbet(today, e.date) <= 5);
+  if (compEarnings.length > 0) {
+    const e = compEarnings[0];
+    items.push({
+      icon: "⚡",
+      text: `<b>${e.ticker}</b> reports ${fmt(e.date)} — will likely move <b>${e.affectsHoldings.map(a => a.heldTicker).join(", ")}</b>`
+    });
+  }
+  
+  // Item 4: Big unrealized losses flag
+  const pos = buildPos();
+  const bigLosses = [];
+  for (const [ticker, holding] of Object.entries(pos)) {
+    if (holding.shares <= 0) continue;
+    const live = S.prices?.[ticker];
+    if (!live) continue;
+    const currentVal = holding.shares * live.current;
+    const cost = holding.shares * holding.avg;
+    const loss = currentVal - cost;
+    const lossPct = (loss / cost) * 100;
+    if (lossPct < -20 && Math.abs(loss) > 10000) {
+      bigLosses.push({ticker, loss, lossPct});
+    }
+  }
+  if (bigLosses.length > 0) {
+    bigLosses.sort((a,b) => a.loss - b.loss);
+    const b = bigLosses[0];
+    items.push({
+      icon: "📉",
+      text: `<b>${b.ticker}</b> is down ${b.lossPct.toFixed(0)}% ($${Math.abs(b.loss/1000).toFixed(0)}K) — consider tax-loss harvesting after checking wash sale rules`
+    });
+  }
+  
+  // Item 5: Daily reminder if no items found
+  if (items.length === 0) {
+    items.push({
+      icon: "✅",
+      text: "No urgent actions today. Use Check tab before ANY trade — it takes 5 seconds and saves thousands in taxes."
+    });
+  }
+  
+  let html = items.slice(0, 4).map(i => 
+    `<div style="font-size:13px;line-height:1.5;margin-bottom:8px;display:flex;gap:8px;align-items:flex-start">
+      <div style="font-size:16px;flex-shrink:0">${i.icon}</div>
+      <div style="color:rgba(255,255,255,.9)">${i.text}</div>
+    </div>`
+  ).join("");
+  
+  content.innerHTML = html;
+  card.style.display = "block";
+}
+
 function renderDash(){
   renderPortfolio();
+  renderPlaybook();
   const aw=document.getElementById("alerts-wrap"), lw=document.getElementById("locks-wrap");
   aw.innerHTML=""; lw.innerHTML="";
   const today=tod();
@@ -1885,6 +1978,30 @@ function renderTrades(){
 // ══════════════════════════════════════════════════════════════════
 // CHECK TRADE - Advanced with simulator + smart tax preview
 // ══════════════════════════════════════════════════════════════════
+
+function autofillCheckPrice() {
+  const ticker = document.getElementById("c-ticker").value.trim().toUpperCase();
+  const priceField = document.getElementById("c-price");
+  const sharesField = document.getElementById("c-shares");
+  if (!ticker || ticker.length < 1) return;
+  // Auto-fill price from live prices or closing prices
+  if (S.prices?.[ticker]?.current) {
+    priceField.value = S.prices[ticker].current.toFixed(2);
+    priceField.placeholder = "Live price loaded";
+  } else if (S.closingPrices?.[ticker]?.price) {
+    priceField.value = S.closingPrices[ticker].price.toFixed(2);
+    priceField.placeholder = "Last close loaded";
+  }
+  // Auto-fill shares from current holding if SELL
+  const action = document.getElementById("c-action").value;
+  if (action === "SELL") {
+    const pos = buildPos();
+    if (pos[ticker]?.shares) {
+      sharesField.placeholder = `You hold ${pos[ticker].shares}`;
+    }
+  }
+}
+
 function updateCheckFields() {
   // Could add conditional UI here in future
 }
@@ -2218,7 +2335,8 @@ Suggest 3 alternative stocks or ETFs you can buy RIGHT NOW instead of ${ticker}.
 Return ONLY valid JSON array, no markdown:
 [{"ticker":"NVDA","reason":"One short plain sentence why this works","sector":"Chips","price":201.50},{"ticker":"SOXX","reason":"...","sector":"ETF","price":184.20},{"ticker":"INTC","reason":"...","sector":"Chips","price":21.30}]`;
 
-    const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":S.cfg.apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-opus-4-7",max_tokens:400,messages:[{role:"user",content:prompt}]})});
+    const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":S.cfg.apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-opus-4-7",max_tokens:400,system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader.",
+        messages:[{role:"user",content:prompt}]})});
     const data=await res.json();
     const text=data.content?.[0]?.text||"";
     const parsed=JSON.parse(text.replace(/```json|```/g,"").trim());
@@ -2256,6 +2374,16 @@ function addManual(){
   const date=document.getElementById("f-d").value;
   const gl=parseFloat(document.getElementById("f-gl").value)||0;
   if(!ticker||!shares||!price||!date){alert("Please fill in all fields.");return;}
+  
+  // Pre-check for wash sale conflict
+  const warnings = checkConflict(ticker, action);
+  if (warnings.length > 0) {
+    const warningText = warnings.map(w => w.msg).join("\n\n");
+    if (!confirm("⚠️ WASH SALE WARNING\n\n" + warningText + "\n\nAdd this trade anyway?")) {
+      return;
+    }
+  }
+  
   const trade={id:"M"+Date.now(),ticker,action,shares,price,date,total:shares*price,gain_loss:action==="SELL"?gl:0,isHistory:false};
   S.trades.push(trade); sv("trades",S.trades);
   computeWS(); renderDash(); renderTrades(); renderStats();
@@ -2348,6 +2476,69 @@ async function runActiveInsightAnalysis() {
   if (view === "pat") return runPatternAnalysis();
 }
 
+
+
+function timeAgo(dateStr) {
+  if (!dateStr) return "";
+  const d = new Date(dateStr.length <= 10 ? dateStr + "T12:00:00" : dateStr);
+  const diff = Date.now() - d.getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "Just now";
+  if (mins < 60) return mins + "m ago";
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + "h ago";
+  const days = Math.floor(hrs / 24);
+  if (days < 7) return days + "d ago";
+  return d.toLocaleDateString();
+}
+
+function sanitizeVoice(obj) {
+  // Recursively replace him/his/he with you/your as a safety net
+  if (typeof obj === "string") {
+    return obj
+      .replace(/\bhe is\b/gi, "you are")
+      .replace(/\bHe is\b/g, "You are")
+      .replace(/\bhe has\b/gi, "you have")
+      .replace(/\bHe has\b/g, "You have")
+      .replace(/\bhe needs\b/gi, "you need")
+      .replace(/\bhe should\b/gi, "you should")
+      .replace(/\bhe can\b/gi, "you can")
+      .replace(/\bhe won\b/gi, "you won")
+      .replace(/\bhe lost\b/gi, "you lost")
+      .replace(/\bhe owns\b/gi, "you own")
+      .replace(/\bhe holds\b/gi, "you hold")
+      .replace(/\bhe bought\b/gi, "you bought")
+      .replace(/\bhe sold\b/gi, "you sold")
+      .replace(/\bhe trades\b/gi, "you trade")
+      .replace(/\bhis wins\b/gi, "your wins")
+      .replace(/\bhis losses\b/gi, "your losses")
+      .replace(/\bhis holdings\b/gi, "your holdings")
+      .replace(/\bhis portfolio\b/gi, "your portfolio")
+      .replace(/\bhis positions\b/gi, "your positions")
+      .replace(/\bhis trades\b/gi, "your trades")
+      .replace(/\bhis pattern\b/gi, "your pattern")
+      .replace(/\bhis history\b/gi, "your history")
+      .replace(/\bhis edge\b/gi, "your edge")
+      .replace(/\bhis fit\b/gi, "your fit")
+      .replace(/\bhis winning\b/gi, "your winning")
+      .replace(/\bfor him\b/gi, "for you")
+      .replace(/\bto him\b/gi, "to you")
+      .replace(/\bfrom him\b/gi, "from you")
+      .replace(/\bMorris Gabbay\b/g, "You")
+      .replace(/\bMorris\'s\b/g, "Your")
+      .replace(/\bMorris\b/g, "You")
+      .replace(/\bthe trader\b/gi, "you")
+      .replace(/\bThe trader\b/g, "You");
+  }
+  if (Array.isArray(obj)) return obj.map(sanitizeVoice);
+  if (obj && typeof obj === "object") {
+    const out = {};
+    for (const k in obj) out[k] = sanitizeVoice(obj[k]);
+    return out;
+  }
+  return obj;
+}
+
 // ── OPPORTUNITY SCANNER ──
 async function runOpportunityScanner() {
   const btn = document.getElementById("insights-btn");
@@ -2361,56 +2552,65 @@ async function runOpportunityScanner() {
   const winningTickers = stats.bestTickers.slice(0,10).map(t => `${t.ticker} (net +$${t.net.toLocaleString()})`).join(", ");
   const losingTickers = stats.worstTickers.slice(0,5).map(t => `${t.ticker} (net -$${Math.abs(t.net).toLocaleString()})`).join(", ");
   
-  const prompt = `You are a wealth-building advisor for Morris Gabbay, an active day trader. English is his second language — use SHORT plain sentences.
+  const prompt = `You are a wealth-building advisor. Address the reader directly as "you" and "your". NEVER use "him", "he", "his", "Morris", or "the trader". English is your reader\'s second language — use SHORT plain sentences.
 
-He currently holds: ${currentTickers}
+You currently hold: ${currentTickers}
 
-His BIGGEST WINNING trades (tickers that make him money): ${winningTickers}
+Your BIGGEST WINNING trades: ${winningTickers}
 
-His BIGGEST LOSING trades (avoid similar patterns): ${losingTickers}
+Your BIGGEST LOSING trades (avoid similar patterns): ${losingTickers}
 
 Wash sale lockouts: ${Object.keys(S.lockouts).filter(t => S.lockouts[t] >= tod()).join(", ") || "none"}
 
-YOUR JOB: Find NEW stocks he should research and potentially buy. Not stocks he already owns. Consider:
-1. Stocks in sectors where he has a PROVEN win rate
-2. Stocks currently trading at significant discounts (52-week lows, earnings gaps, etc.)
-3. Stocks with upcoming catalysts (earnings beats, product launches, FDA approvals)
-4. Avoid anything substantially similar to his big losers
+YOUR JOB: Find NEW stocks you should research and potentially buy. Not stocks you already own. Consider:
+1. Stocks in sectors where you have a PROVEN win rate
+2. Stocks currently trading at significant discounts
+3. Stocks with upcoming catalysts
+4. Avoid anything substantially similar to your big losers
 5. Factor in CURRENT market conditions as of right now
 
-Return ONLY valid JSON, no markdown:
+Return ONLY valid JSON, no markdown. EVERY string field must use "you/your" language — never "him/his/he":
 {
-  "strategy_summary": "1-2 sentences on the current opportunity landscape",
+  "strategy_summary": "1-2 sentences using \"you\" — about your current opportunity landscape",
   "top_opportunities": [
     {
       "ticker": "XYZ",
       "name": "Full company name",
       "sector": "Sector name",
-      "why_now": "1-2 short sentences on why this is opportunity right now",
+      "why_now": "1-2 short sentences on why this is an opportunity right now",
       "current_price": 150.25,
       "target_price": 185.00,
       "upside_pct": 23,
       "confidence": "high OR medium OR speculative",
-      "catalyst": "Specific upcoming event or reason",
-      "his_fit": "Why this matches his winning patterns",
-      "suggested_position_size": "$5K-10K based on portfolio"
+      "catalyst": "Specific upcoming event",
+      "your_fit": "Why this matches YOUR winning patterns — use 'you/your' only",
+      "suggested_position_size": "$5K-10K based on your portfolio"
     }
   ],
   "sectors_to_hunt": [
-    {"sector": "Semiconductors", "reason": "Why this sector is ripe", "his_edge": "His winning pattern here"}
+    {"sector": "Semiconductors", "reason": "Why this sector is ripe", "your_edge": "Your winning pattern here — use 'you/your' only"}
+  ],
+  "past_misses": [
+    {"ticker": "NVDA", "what_happened": "You sold at X, stock ran to Y after — 1 short sentence", "estimated_miss": "$50K", "lesson": "Plain English pattern to watch for next time"}
   ],
   "avoid_list": [
     {"ticker": "ABC", "reason": "Why to skip despite being hyped"}
   ]
 }
 
-Give 5-7 top_opportunities. Be SPECIFIC with ticker symbols, real current prices, real catalysts. No vague suggestions.`;
+Give 5-7 top_opportunities. Be SPECIFIC with ticker symbols, real current prices, real catalysts.
+REQUIRED: past_misses MUST include 3-5 entries. Analyze your winning/losing tickers for:
+- Stocks sold early that ran up significantly after
+- Stocks where losses would have recovered if held longer
+- Moves missed while trading something else
+CRITICAL: Every sentence uses "you/your" — NEVER "him/his/he/Morris/the trader".`;
 
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {"Content-Type": "application/json", "x-api-key": S.cfg.apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true"},
-      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 4000, messages: [{role: "user", content: prompt}]})
+      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 4000, system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader.",
+        messages: [{role: "user", content: prompt}]})
     });
     const data = await res.json();
     if (!res.ok) throw new Error(`API ${res.status}: ${data.error?.message || 'unknown'}`);
@@ -2447,39 +2647,44 @@ async function runPortfolioXray() {
   
   const posStr = positions.map(p => `${p.ticker}: $${(p.value/1000).toFixed(1)}K (${((p.value/totalVal)*100).toFixed(1)}%) — ${p.sector}`).join("\n");
   
-  const prompt = `Morris Gabbay has a $${(totalVal/1000000).toFixed(2)}M portfolio. Run a deep X-ray analysis.
+  const prompt = `You have a $${(totalVal/1000000).toFixed(2)}M portfolio. Run a deep X-ray analysis.
 
-POSITIONS (sorted by value):
+Address the reader directly as "you" — NEVER say "him", "he", "his", "Morris", or "the trader".
+
+YOUR POSITIONS (sorted by value):
 ${posStr}
 
-Identify risks and imbalances. Be direct — this is his wealth.
+Identify risks and imbalances. Be direct — this is your wealth.
 
-Return ONLY valid JSON, no markdown:
+Return ONLY valid JSON, no markdown. Every string field uses "you/your" language:
 {
   "health_score": "1-100 number",
-  "overall_assessment": "1-2 sentences",
+  "overall_assessment": "1-2 sentences addressing YOU — never 'him/he'",
   "concentration_risks": [
-    {"issue": "What is over-concentrated", "detail": "Specific numbers", "severity": "high OR medium OR low", "fix": "What to do about it"}
+    {"issue": "What is over-concentrated", "detail": "Specific numbers", "severity": "high OR medium OR low", "fix": "What YOU should do about it"}
   ],
   "sector_balance": [
     {"sector": "Semiconductors", "exposure_pct": 35, "recommended_max": 25, "status": "over OR balanced OR under"}
   ],
   "correlation_warnings": [
-    {"group": "NVDA, AMD, AVGO all chip", "risk": "Move together in chip sector downturns", "reduce_to": "Keep 2 of these, exit third"}
+    {"group": "NVDA, AMD, AVGO all chip", "risk": "These move together in chip sector downturns", "reduce_to": "Keep 2 of these, exit third"}
   ],
   "missing_sectors": [
-    {"sector": "Healthcare", "reason": "Zero exposure creates blind spot", "suggested": "Consider UNH, LLY, or XLV ETF"}
+    {"sector": "Healthcare", "reason": "Zero exposure creates a blind spot in your portfolio", "suggested": "Consider UNH, LLY, or XLV ETF"}
   ],
   "top_3_actions": [
-    "Plain English action, specific numbers"
+    "Plain English action using 'you/your' — specific numbers"
   ]
-}`;
+}
+
+CRITICAL: Every sentence uses "you/your" — NEVER "him/his/he/Morris/the trader".`;
 
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {"Content-Type": "application/json", "x-api-key": S.cfg.apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true"},
-      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 3000, messages: [{role: "user", content: prompt}]})
+      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 3000, system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader.",
+        messages: [{role: "user", content: prompt}]})
     });
     const data = await res.json();
     if (!res.ok) throw new Error(`API ${res.status}: ${data.error?.message || 'unknown'}`);
@@ -2530,22 +2735,24 @@ async function runPositionOptimizer() {
   
   const posStr = positions.map(p => `${p.ticker}: ${p.shares} sh @ $${p.avg_cost.toFixed(2)} (now $${p.current_price.toFixed(2)}), unrealized ${p.unrealized_pct}% ($${p.unrealized.toFixed(0)}), ${p.wash_locked ? "WASH-LOCKED" : "free to sell"}, hist win rate ${p.historical_winrate || "N/A"}%`).join("\n");
   
-  const prompt = `Rate every position in Morris's portfolio with an action. Be direct and specific.
+  const prompt = `Rate every position in YOUR portfolio with an action. Be direct and specific.
 
-POSITIONS:
+Address the reader directly as "you" — NEVER use "him", "he", "his", "Morris", or "the trader".
+
+YOUR POSITIONS:
 ${posStr}
 
 For EACH position, recommend: HOLD, TRIM (reduce), ADD (buy more), or EXIT (sell all).
 
-Return ONLY valid JSON, no markdown:
+Return ONLY valid JSON, no markdown. All reason text uses "you/your":
 {
-  "summary": "1 sentence overall",
+  "summary": "1 sentence overall, using \"you\" not \"he\"",
   "ratings": [
     {
       "ticker": "AAPL",
       "action": "HOLD OR TRIM OR ADD OR EXIT",
       "confidence": "high OR medium OR low",
-      "reason": "1-2 short sentences",
+      "reason": "1-2 short sentences addressing YOU directly",
       "specific_quantity": "How many shares to trim/add if applicable",
       "priority": "now OR next_week OR when_convenient",
       "wash_warning": "Include if relevant"
@@ -2553,13 +2760,15 @@ Return ONLY valid JSON, no markdown:
   ]
 }
 
-Rate ALL ${positions.length} positions. Use the historical win rate data.`;
+Rate ALL ${positions.length} positions. Use the historical win rate data.
+CRITICAL: Every reason uses "you/your" — NEVER "him/his/he/Morris".`;
 
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {"Content-Type": "application/json", "x-api-key": S.cfg.apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true"},
-      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 6000, messages: [{role: "user", content: prompt}]})
+      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 6000, system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader.",
+        messages: [{role: "user", content: prompt}]})
     });
     const data = await res.json();
     if (!res.ok) throw new Error(`API ${res.status}: ${data.error?.message || 'unknown'}`);
@@ -2633,7 +2842,7 @@ function renderOpportunities(wrap, d) {
         </div>
         <div style="font-size:13px;line-height:1.5;color:rgba(255,255,255,.85);margin-bottom:8px">${o.why_now}</div>
         ${o.catalyst ? `<div style="font-size:11px;color:var(--gold2);margin-bottom:4px">⚡ ${o.catalyst}</div>` : ''}
-        ${o.his_fit ? `<div style="font-size:11px;color:var(--green2);margin-bottom:4px">✅ ${o.his_fit}</div>` : ''}
+        ${o.your_fit || o.his_fit ? `<div style="font-size:11px;color:var(--green2);margin-bottom:4px">✅ ${o.your_fit || o.his_fit}</div>` : ''}
         ${o.suggested_position_size ? `<div style="font-size:11px;color:var(--muted);margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,.08)">💵 Suggested position: ${o.suggested_position_size}</div>` : ''}
       </div>`;
     }
@@ -2645,7 +2854,21 @@ function renderOpportunities(wrap, d) {
       html += `<div style="background:rgba(26,79,214,.1);border-left:3px solid #93c5fd;border-radius:8px;padding:11px 13px;margin-bottom:6px">
         <div style="font-size:13px;font-weight:800;color:#93c5fd;margin-bottom:4px">${s.sector}</div>
         <div style="font-size:12px;color:rgba(255,255,255,.85);line-height:1.4">${s.reason}</div>
-        ${s.his_edge ? `<div style="font-size:11px;color:var(--green2);margin-top:4px">Your edge: ${s.his_edge}</div>` : ''}
+        ${s.your_edge || s.his_edge ? `<div style="font-size:11px;color:var(--green2);margin-top:4px">Your edge: ${s.your_edge || s.his_edge}</div>` : ''}
+      </div>`;
+    }
+  }
+  
+  if (d.past_misses?.length) {
+    html += `<div class="sec-lbl">🎯 Missed Opportunities — Learn From These</div>`;
+    for (const m of d.past_misses) {
+      html += `<div style="background:rgba(212,160,23,.08);border:1px solid rgba(253,230,138,.2);border-radius:13px;padding:13px;margin-bottom:7px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+          <div style="font-size:16px;font-weight:800;font-family:'Playfair Display',serif;color:var(--gold2)">${m.ticker}</div>
+          ${m.estimated_miss ? `<div style="font-size:12px;color:var(--warn2);font-weight:700">${m.estimated_miss}</div>` : ''}
+        </div>
+        <div style="font-size:13px;color:rgba(255,255,255,.85);margin-bottom:6px;line-height:1.5"><b>What happened:</b> ${m.what_happened}</div>
+        ${m.lesson ? `<div style="font-size:12px;color:var(--gold2);line-height:1.5;padding-top:6px;border-top:1px solid rgba(255,255,255,.08)"><b>📚 Lesson:</b> ${m.lesson}</div>` : ''}
       </div>`;
     }
   }
@@ -2780,10 +3003,23 @@ function renderOptimizer(wrap, d) {
 }
 
 // ── BOOT ───────────────────────────────────────────────────────────
-const APP_VERSION = "2.0-opus47-2026-04-18";
+const APP_VERSION = "2.1-voice-fix-2026-04-18";
 
 window.addEventListener("load",()=>{
   console.log("Morris Trader", APP_VERSION);
+  // Clear stale AI caches on version upgrade (so old him/his responses get refreshed)
+  const storedVer = localStorage.getItem("mt_app_version");
+  if (storedVer !== APP_VERSION) {
+    console.log("Version upgrade: clearing AI cache");
+    localStorage.removeItem("mt_brief");
+    localStorage.removeItem("mt_briefDate");
+    localStorage.removeItem("mt_patterns");
+    localStorage.removeItem("mt_patternsDate");
+    localStorage.removeItem("mt_opportunities");
+    localStorage.removeItem("mt_xray");
+    localStorage.removeItem("mt_optimize");
+    localStorage.setItem("mt_app_version", APP_VERSION);
+  }
   // Fallback setup button handler
   const btn = document.getElementById("setup-go-btn");
   if (btn) btn.addEventListener("click", doSetup);
