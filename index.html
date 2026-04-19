@@ -977,20 +977,22 @@ async function genBrief(){
 Session: ${ctx.session}
 ${ctx.planFor}
 
-You are advising Morris Gabbay, an elderly active day trader. English is his second language.
+You are a trading advisor. Address the reader directly as "you" — NEVER "him", "he", or "the trader". English is your reader's second language.
 SHORT sentences. No jargon. Plain English only. Be specific with prices.
 
-His top holdings: ${topTickers}
+Your top holdings: ${topTickers}
 
-His positions with latest prices:
+Your positions with latest prices:
 ${posLines}
 
-SECTOR RELATIONSHIPS — competitor moves affect his stocks:
+SECTOR RELATIONSHIPS — competitor moves affect your stocks:
 ${sectorStr}
 
 Wash sale lockouts (NEVER suggest selling these at a loss): ${lockStr}
 
-⚠️ WASH SALE AWARENESS: This trader has already lost $185K to wash sales. NEVER suggest buying a stock he sold in the last 30 days. NEVER suggest selling at a loss if he bought it in the last 30 days. Rotate between DIFFERENT stocks if recommending short holds.
+⚠️ WASH SALE AWARENESS: You have already lost $185K to wash sales. NEVER suggest buying a stock you sold in the last 30 days. NEVER suggest selling at a loss if you bought it in the last 30 days. Rotate between DIFFERENT stocks if recommending short holds.
+
+CRITICAL: Use "you" and "your" throughout. NEVER say "him", "his", "he". The reader IS the trader.
 
 YOUR JOB:
 1. Search your knowledge for the LATEST news on his holdings AND their sector competitors as of RIGHT NOW
@@ -1021,7 +1023,8 @@ Rules:
 - conservative: 2 suggestions max · moderate: 3-4 · active: 4-5
 - NEVER suggest selling more than 25% of held position
 - Mark wash_risk true if ticker is in lockouts
-- SHORT simple English — he is elderly`;
+- SHORT simple English — English is your reader's second language
+- Always "you/your" — never "him/he/his"`;
 
   try{
     const res=await fetch("https://api.anthropic.com/v1/messages",{
@@ -1085,7 +1088,7 @@ Rules:
 async function parseClosingSummary(subject, body, msgId) {
   if (!S.cfg.apiKey) return null;
   try {
-    const prompt = `Extract portfolio positions from this Schwab closing summary email.
+    const prompt = `Extract portfolio positions from this Schwab closing summary email. Use "you/your" language if any descriptive text is generated.
 Return ONLY valid JSON array, no markdown:
 [{"ticker":"AAPL","close_price":270.23,"day_change_pct":2.59,"quantity":100},...]
 Only include equity positions with a ticker symbol. Skip cash, indices, money market.
@@ -1499,14 +1502,14 @@ async function runPatternAnalysis() {
   const washLosses = washSales.reduce((sum, w) => sum + Math.abs(w.loss || 0), 0);
   const washTax = washSales.reduce((sum, w) => sum + (w.tax || 0), 0);
   
-  const prompt = `Analyze these 981 trades from a day trader and find patterns that make money vs lose money. This is serious money analysis - be direct, specific, actionable.
+  const prompt = `Analyze these 981 trades and find patterns that make money vs lose money. Address the reader directly as "you" — never "him", "he", or "the trader". This is a personal trading tool.
 
 ⚠️ CRITICAL CONTEXT — WASH SALE PROBLEM:
-This trader has already triggered ${washSales.length} wash sales in the last 6 months.
+You have already triggered ${washSales.length} wash sales in the last 6 months.
 Total disallowed losses: $${Math.round(washLosses).toLocaleString()}
 Estimated extra tax from wash sales: $${Math.round(washTax).toLocaleString()}
 
-This means any "short hold" strategy that involves repeatedly buying and selling the same stock is EXTREMELY DANGEROUS for him — it has already cost him nearly $185K in phantom taxes. DO NOT recommend short holding patterns that repeat on the same ticker. Any short-hold win-rate advice must include the warning that doing this on the same stock creates wash sales.
+This means any "short hold" strategy that involves repeatedly buying and selling the same stock is EXTREMELY DANGEROUS — it has already cost you nearly $185K in phantom taxes. DO NOT recommend short holding patterns that repeat on the same ticker. Any short-hold win-rate advice must include the warning that doing this on the same stock creates wash sales.
 
 OVERALL STATS:
 - Total trades: ${trades.length}
@@ -1555,8 +1558,9 @@ RULES:
 - For ANY "what_works" pattern involving short holds (days to weeks), set wash_risk: true and explicitly explain in detail that it only works when rotating between DIFFERENT stocks, never the same one within 30 days
 - In "dangerous_habits" - the #1 habit to flag is triggering wash sales by rebuying same ticker within 30 days
 - In "missed_opportunities" - analyze his trade history for stocks he SOLD EARLY that then ran up big, or stocks he BOUGHT and LOST on that would have been profitable if held longer
-- Be BLUNT. Morris is elderly, English is second language, plain simple sentences only
-- If a best-performing ticker shows 15+ trades, flag that this volume on one stock is what creates wash sales`;
+- Be BLUNT, direct, use "you/your" NEVER "him/he/his". English is your second language — plain simple sentences only.
+- If a best-performing ticker shows 15+ trades, flag that this volume on one stock is what creates wash sales
+- NEVER use words like "for him", "his holdings", "him", "he". Always say "you", "your stocks", "your holdings"`;
 
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -2200,15 +2204,16 @@ async function getAlternatives(ticker, action){
   // Enhance with AI for personalized suggestions based on his actual portfolio
   try{
     const lockStr=Object.entries(S.lockouts).filter(([,d])=>d>=tod()).map(([t])=>t).join(", ");
-    const prompt=`Morris wants to ${action} ${ticker} but it will trigger a wash sale. He needs an alternative stock to buy instead so he stays in the market.
+    const prompt=`You want to ${action} ${ticker} but it will trigger a wash sale. You need an alternative stock to buy instead so you stay in the market.
 
-His wash sale lockouts (avoid these too): ${lockStr}
+Your wash sale lockouts (avoid these too): ${lockStr}
 
-Suggest 3 alternative stocks or ETFs he can buy RIGHT NOW instead of ${ticker}. Each must:
+Suggest 3 alternative stocks or ETFs you can buy RIGHT NOW instead of ${ticker}. Each must:
 - Be in the same sector or similar market exposure
 - NOT be substantially identical to ${ticker}
 - NOT be in the lockout list above
 - Have a specific current price
+- Address the reader as "you" throughout the reason text
 
 Return ONLY valid JSON array, no markdown:
 [{"ticker":"NVDA","reason":"One short plain sentence why this works","sector":"Chips","price":201.50},{"ticker":"SOXX","reason":"...","sector":"ETF","price":184.20},{"ticker":"INTC","reason":"...","sector":"Chips","price":21.30}]`;
