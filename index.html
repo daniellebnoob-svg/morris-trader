@@ -386,15 +386,22 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
         <div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.6">
           Import authoritative data from Schwab. These drive the Taxes tab and fix financial displays.
         </div>
-        <button onclick="importSchwabRealized()" style="width:100%;padding:11px;background:rgba(212,160,23,.15);border:1px solid rgba(253,230,138,.3);color:var(--gold2);border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;margin-bottom:7px">💰 Import Realized Gain/Loss CSV</button>
+        <button onclick="importSchwabRealized()" style="width:100%;padding:11px;background:rgba(212,160,23,.15);border:1px solid rgba(253,230,138,.3);color:var(--gold2);border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;margin-bottom:7px">💰 Import Realized G/L <b>DETAILS</b> CSV</button>
         <div id="schwab-realized-status" style="font-size:11px;color:var(--muted);margin-bottom:10px">Not imported yet</div>
-        <button onclick="importSchwabPositions()" style="width:100%;padding:11px;background:rgba(26,79,214,.15);border:1px solid rgba(147,197,253,.3);color:#93c5fd;border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;margin-bottom:7px">📋 Import Positions CSV</button>
+        <button onclick="importSchwabPositions()" style="width:100%;padding:11px;background:rgba(26,79,214,.15);border:1px solid rgba(147,197,253,.3);color:#93c5fd;border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;margin-bottom:7px">📋 Import <b>Positions</b> CSV</button>
         <div id="schwab-positions-status" style="font-size:11px;color:var(--muted);margin-bottom:10px">Not imported yet</div>
         <div style="font-size:11px;color:var(--muted);padding:10px;background:rgba(255,255,255,.04);border-radius:8px;line-height:1.5">
           <b style="color:var(--gold2)">How to export from Schwab:</b><br>
-          1. schwab.com → Accounts → Realized Gain/Loss → Export → choose <b>"Export Details Only"</b><br>
-          2. Accounts → Positions → Export<br>
-          Re-import weekly for fresh numbers.
+          <b style="color:var(--white)">For Realized G/L:</b><br>
+          1. schwab.com → Accounts → <b>Realized Gain/Loss</b> tab<br>
+          2. Click the <b>Export</b> button in the upper right<br>
+          3. Select <b>"Export Details Only"</b> (NOT Summary)<br>
+          4. Save the CSV, import it above<br><br>
+          <b style="color:var(--white)">For Positions:</b><br>
+          1. schwab.com → Accounts → <b>Positions</b> tab<br>
+          2. Click <b>Export</b> → saves as CSV<br>
+          3. Import it above<br><br>
+          Re-import weekly for fresh numbers. Email updates fill the gaps between imports.
         </div>
       </div>
 
@@ -638,21 +645,34 @@ async function fetchLivePrices() {
   const prices = {};
   const now = Date.now();
   
-  // Only fetch if prices are older than 5 minutes (cache)
-  if (S.pricesUpdated && (now - S.pricesUpdated) < 300000) {
+  // Only fetch if prices are older than 10 minutes (cache to avoid rate limits)
+  if (S.pricesUpdated && (now - S.pricesUpdated) < 600000) {
     return S.prices;
   }
   
-  for (let i = 0; i < tickers.length; i++) {
-    const ticker = tickers[i];
+  // Prioritize biggest positions first (by value) so if we hit rate limit, key positions are covered
+  const tickersSorted = tickers.sort((a, b) => {
+    const valA = (pos[a].shares || 0) * (pos[a].avg || 0);
+    const valB = (pos[b].shares || 0) * (pos[b].avg || 0);
+    return valB - valA;
+  });
+  
+  // Respect 60/min rate limit — space requests at 1.1 seconds apart
+  for (let i = 0; i < tickersSorted.length; i++) {
+    const ticker = tickersSorted[i];
     try {
       const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${ticker}&token=${S.cfg.finnhubKey}`);
+      if (res.status === 429) {
+        // Rate limited — stop and use what we have
+        console.log(`Finnhub rate limited at ${i}/${tickersSorted.length}, using cached prices for rest`);
+        break;
+      }
       const data = await res.json();
       if (data.c && data.c > 0) {
         prices[ticker] = {
-          current: data.c,        // Current price
-          change: data.d,         // Change $
-          changePct: data.dp,     // Change %
+          current: data.c,
+          change: data.d,
+          changePct: data.dp,
           high: data.h,
           low: data.l,
           open: data.o,
@@ -660,8 +680,8 @@ async function fetchLivePrices() {
           updated: now
         };
       }
-      // Respect rate limit: 60/min = 1 per second max
-      if (i < tickers.length - 1 && i % 30 === 29) {
+      // Throttle: 1.1 second delay between every call (keeps us under 60/min safely)
+      if (i < tickersSorted.length - 1) {
         await new Promise(r => setTimeout(r, 1100));
       }
     } catch(e) {
@@ -1980,6 +2000,356 @@ function renderTaxes() {
     </div>`;
     return;
   }
+
+
+// ═══════════════════════════════════════════════════════════════════
+// PHASE 4: "Is It Worth It?" — Sell vs Hold Calculator
+// Hardcoded sector map for safe alternatives (instant)
+// Plus AI button for real-time alternative suggestions
+// ═══════════════════════════════════════════════════════════════════
+
+const SAFE_ALTERNATIVES = {
+  // Semiconductors — avoid direct chip replacements, use broad ETFs or different chip types
+  "NVDA": ["SMH (chip ETF)", "AVGO", "QCOM"],
+  "AMD": ["SMH (chip ETF)", "MRVL", "ARM"],
+  "MU": ["SMH (chip ETF)", "AMAT", "LRCX"],
+  "AVGO": ["SMH (chip ETF)", "QCOM", "MRVL"],
+  "QCOM": ["SMH (chip ETF)", "AVGO", "TXN"],
+  "INTC": ["SMH (chip ETF)", "TXN", "ADI"],
+  "SMCI": ["SMH (chip ETF)", "DELL", "HPE"],
+  "SMH": ["XSD", "SOXX", "SOXQ"],
+  "TSM": ["SMH (chip ETF)", "ASML", "AMAT"],
+  "ARM": ["SMH (chip ETF)", "QCOM", "MRVL"],
+  "MRVL": ["SMH (chip ETF)", "AVGO", "QCOM"],
+  
+  // Mega-cap tech
+  "AAPL": ["QQQ (tech ETF)", "MSFT", "GOOGL"],
+  "MSFT": ["QQQ (tech ETF)", "ORCL", "CRM"],
+  "GOOGL": ["QQQ (tech ETF)", "META", "MSFT"],
+  "META": ["QQQ (tech ETF)", "SNAP", "PINS"],
+  "AMZN": ["QQQ (tech ETF)", "SHOP", "MELI"],
+  "TSLA": ["RIVN", "LCID", "F"],
+  
+  // Software / cloud
+  "CRWD": ["HACK (cyber ETF)", "PANW", "ZS"],
+  "PANW": ["HACK (cyber ETF)", "CRWD", "FTNT"],
+  "NET": ["SKYY (cloud ETF)", "FSLY", "AKAM"],
+  "SNOW": ["DATA (data ETF)", "MDB", "PLTR"],
+  "MDB": ["DATA (data ETF)", "SNOW", "CFLT"],
+  "ORCL": ["MSFT", "CRM", "SAP"],
+  "CRM": ["QQQ (tech ETF)", "ORCL", "ADBE"],
+  
+  // China
+  "BABA": ["MCHI (China ETF)", "JD", "PDD"],
+  "BIDU": ["MCHI (China ETF)", "JD", "PDD"],
+  "JD": ["MCHI (China ETF)", "BABA", "PDD"],
+  "PDD": ["MCHI (China ETF)", "BABA", "JD"],
+  "FXI": ["MCHI", "KWEB", "ASHR"],
+  
+  // Defense / Aerospace
+  "BA": ["ITA (aerospace ETF)", "LMT", "RTX"],
+  "LMT": ["ITA (aerospace ETF)", "NOC", "RTX"],
+  "ESLT": ["ITA (aerospace ETF)", "LMT", "NOC"],
+  "AVAV": ["ITA (aerospace ETF)", "KTOS", "AXON"],
+  "ITA": ["PPA", "XAR", "DFEN"],
+  
+  // Precious metals
+  "GLD": ["IAU (gold ETF)", "GDX", "GDXJ"],
+  "SLV": ["SIVR (silver ETF)", "SIL", "PSLV"],
+  "GDX": ["GLD", "GDXJ", "SGDM"],
+  
+  // Energy
+  "UCO": ["USO", "XLE", "XOP"],
+  "XLE": ["VDE", "XOP", "OIH"],
+  
+  // Healthcare
+  "UNH": ["XLV (healthcare ETF)", "CVS", "HUM"],
+  "HUM": ["XLV (healthcare ETF)", "UNH", "CVS"],
+  "LLY": ["XLV (healthcare ETF)", "NVO", "PFE"],
+  "NVO": ["XLV (healthcare ETF)", "LLY", "PFE"],
+  "HIMS": ["XLV (healthcare ETF)", "TDOC", "ONEM"],
+  "OSCR": ["XLV (healthcare ETF)", "CLOV", "HIMS"],
+  
+  // Crypto / Bitcoin
+  "COIN": ["HOOD", "SQ", "BITW"],
+  "IBIT": ["GBTC", "FBTC", "BITB"],
+  "MSTR": ["IBIT", "GBTC", "BTF"],
+  
+  // Nuclear / Uranium
+  "OKLO": ["URA (uranium ETF)", "CCJ", "LEU"],
+  "LEU": ["URA (uranium ETF)", "CCJ", "OKLO"],
+  "CCJ": ["URA (uranium ETF)", "LEU", "NXE"],
+  
+  // Inverse / leveraged — substitute with similar direction
+  "SQQQ": ["PSQ (1x short QQQ)", "SH (1x short S&P)", "RWM"],
+  "TSLL": ["TSLA", "NVDA", "IVV"],
+  "NVDL": ["NVDA", "SMH", "SOXL"],
+  
+  // Media / Communication
+  "NFLX": ["DIS", "PARA", "WBD"],
+  "DIS": ["NFLX", "CMCSA", "WBD"],
+  
+  // Consumer
+  "COST": ["XLP (staples ETF)", "WMT", "TGT"],
+  "WMT": ["COST", "TGT", "XLP"],
+  "TGT": ["XLP (staples ETF)", "WMT", "COST"],
+  "HD": ["LOW", "XLY", "BLDR"],
+  "DIS": ["NFLX", "PARA", "WBD"],
+  "DECK": ["NKE", "LULU", "XLY"],
+  "RCL": ["CCL", "NCLH", "XLY"],
+  "CCL": ["RCL", "NCLH", "XLY"],
+  
+  // Financial
+  "AXP": ["XLF (financial ETF)", "V", "MA"]
+};
+
+function getSafeAlternatives(ticker) {
+  const alts = SAFE_ALTERNATIVES[ticker.toUpperCase()];
+  if (alts) return alts;
+  // Generic fallback based on commonly-held broad ETFs
+  return ["SPY (broad market)", "QQQ (tech-heavy)", "VOO (S&P 500)"];
+}
+
+function autofillWorthIt() {
+  const ticker = document.getElementById("w-ticker").value.trim().toUpperCase();
+  const sharesField = document.getElementById("w-shares");
+  if (!ticker) return;
+  
+  // Auto-fill with current holding amount if in Schwab positions
+  if (S.schwabPositions?.positions) {
+    const pos = S.schwabPositions.positions.find(p => p.ticker === ticker);
+    if (pos) {
+      sharesField.placeholder = `You hold ${pos.shares}`;
+    }
+  }
+}
+
+async function runWorthIt() {
+  const ticker = document.getElementById("w-ticker").value.trim().toUpperCase();
+  const sharesInput = parseFloat(document.getElementById("w-shares").value);
+  const resultDiv = document.getElementById("w-result");
+  
+  if (!ticker) {
+    resultDiv.innerHTML = `<div style="padding:12px;background:rgba(220,38,38,.1);border-radius:8px;color:var(--red2);font-size:13px">Please enter a ticker.</div>`;
+    return;
+  }
+  
+  // Get your current position
+  let position = null;
+  if (S.schwabPositions?.positions) {
+    position = S.schwabPositions.positions.find(p => p.ticker === ticker);
+  }
+  
+  if (!position) {
+    resultDiv.innerHTML = `<div style="padding:12px;background:rgba(217,119,6,.1);border:1px solid rgba(253,230,138,.3);border-radius:8px;color:var(--warn2);font-size:13px">You don't hold ${ticker} according to Schwab positions data. Import your Positions CSV in Settings, or check the ticker spelling.</div>`;
+    return;
+  }
+  
+  const shares = sharesInput || position.shares;
+  const costPerShare = position.costBasisPerShare;
+  const costBasis = shares * costPerShare;
+  
+  // Get current price
+  const live = S.prices?.[ticker];
+  if (!live) {
+    resultDiv.innerHTML = `<div style="padding:12px;background:rgba(217,119,6,.1);border:1px solid rgba(253,230,138,.3);border-radius:8px;color:var(--warn2);font-size:13px">No live price for ${ticker}. Hit Refresh on Home to load prices.</div>`;
+    return;
+  }
+  
+  const currentPrice = live.current;
+  const currentValue = shares * currentPrice;
+  const gainLoss = currentValue - costBasis;
+  const gainLossPct = costBasis > 0 ? (gainLoss / costBasis) * 100 : 0;
+  
+  // Check wash sale safety (any BUY within last 30 days would prevent loss recognition)
+  const hasRecentBuy = S.trades.some(t => 
+    t.ticker === ticker && t.action === "BUY" && 
+    dbet(t.date, tod()) <= 30
+  );
+  const lockedUntil = S.lockouts?.[ticker];
+  const isLocked = lockedUntil && lockedUntil >= tod();
+  
+  // Tax bracket
+  const fedRate = (S.cfg.taxBracket || 37) / 100;
+  const niitRate = 0.038;  // Confirmed AGI > $250K threshold for Morris
+  const totalTaxRate = fedRate + niitRate;
+  
+  // ══ Scenario A: Sell now ══
+  const sellProceeds = currentValue;
+  const taxImpact = gainLoss * totalTaxRate; // Negative if loss (tax savings)
+  const netAfterTax = sellProceeds - (gainLoss > 0 ? taxImpact : 0) + (gainLoss < 0 ? Math.abs(taxImpact) : 0);
+  
+  // ══ Scenario B: Hold for 31 days then sell (for loss-harvest case only) ══
+  // Estimate price risk: assume ±5% typical 30-day volatility on any stock
+  // This is rough — could use Finnhub beta in future
+  const volatility30d = 0.08; // 8% typical monthly volatility range
+  const priceRiskLow = currentPrice * (1 - volatility30d);
+  const priceRiskHigh = currentPrice * (1 + volatility30d);
+  
+  // ══ Scenario C: Buy safe alternative immediately ══
+  const alternatives = getSafeAlternatives(ticker);
+  
+  // Build the comparison
+  let html = '';
+  
+  // Position summary header
+  html += `<div style="background:linear-gradient(135deg,rgba(26,79,214,.15),rgba(8,145,178,.1));border:1px solid rgba(26,79,214,.3);border-radius:12px;padding:14px;margin-bottom:10px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+      <div>
+        <div style="font-family:'Playfair Display',serif;font-size:22px;font-weight:800;color:var(--gold2)">${ticker}</div>
+        <div style="font-size:12px;color:var(--muted)">${shares.toLocaleString()} shares @ $${costPerShare.toFixed(2)} avg</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:14px;font-weight:700;color:${gainLoss >= 0 ? 'var(--green2)' : 'var(--red2)'}">${gainLoss >= 0 ? '+' : '-'}$${Math.abs(gainLoss).toFixed(0).toLocaleString()}</div>
+        <div style="font-size:11px;color:var(--muted)">${gainLossPct.toFixed(1)}% ${gainLoss >= 0 ? 'gain' : 'loss'}</div>
+      </div>
+    </div>
+    <div style="font-size:12px;color:rgba(255,255,255,.85)">Current: $${currentPrice.toFixed(2)} · Position value: $${currentValue.toFixed(0).toLocaleString()}</div>
+  </div>`;
+  
+  // Wash sale warning if applicable
+  if (isLocked || hasRecentBuy) {
+    html += `<div style="background:rgba(220,38,38,.15);border:1px solid rgba(252,165,165,.3);border-radius:10px;padding:12px;margin-bottom:10px">
+      <div style="font-size:13px;font-weight:800;color:var(--red2);margin-bottom:4px">⚠️ WASH SALE LOCKED</div>
+      <div style="font-size:12px;color:rgba(255,255,255,.9);line-height:1.5">You bought ${ticker} within the last 30 days. If you sell now at a loss, the loss will be DISALLOWED — no tax benefit. Wait until <b>${lockedUntil ? fmt(lockedUntil) : 'at least 31 days after your most recent buy'}</b> before selling at a loss, OR buy a safe alternative below.</div>
+    </div>`;
+  }
+  
+  // Scenario comparisons
+  html += `<div class="sec-lbl" style="margin-top:12px">3 Scenarios Compared</div>`;
+  
+  // === Scenario A: Sell Now ===
+  const sellLabel = gainLoss < 0 ? 'Harvest the Loss' : 'Take the Gain';
+  const taxImpactLabel = gainLoss < 0 
+    ? `Tax saved: ~$${Math.abs(taxImpact).toFixed(0).toLocaleString()}` 
+    : `Tax owed: ~$${taxImpact.toFixed(0).toLocaleString()}`;
+  
+  html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:13px;margin-bottom:7px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <div style="font-size:14px;font-weight:800;color:#fff">🔴 SELL NOW — ${sellLabel}</div>
+      ${isLocked ? '<div style="font-size:10px;color:var(--red2);background:rgba(220,38,38,.2);padding:3px 8px;border-radius:6px;font-weight:700">BLOCKED</div>' : ''}
+    </div>
+    <div style="font-size:12px;color:rgba(255,255,255,.85);line-height:1.6">
+      Proceeds: <b>$${sellProceeds.toFixed(0).toLocaleString()}</b><br>
+      ${gainLoss >= 0 ? 'Realized gain' : 'Realized loss'}: <b style="color:${gainLoss >= 0 ? 'var(--green2)' : 'var(--red2)'}">${gainLoss >= 0 ? '+' : '-'}$${Math.abs(gainLoss).toFixed(0).toLocaleString()}</b><br>
+      <span style="color:${gainLoss < 0 ? 'var(--green2)' : 'var(--warn2)'}">${taxImpactLabel}</span> (at ${(totalTaxRate*100).toFixed(1)}% combined rate)<br>
+      <span style="color:var(--red2)">⚠️ Cannot rebuy ${ticker} for 31 days</span>
+    </div>
+  </div>`;
+  
+  // === Scenario B: Hold ===
+  html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:13px;margin-bottom:7px">
+    <div style="font-size:14px;font-weight:800;color:#fff;margin-bottom:6px">⏸️ HOLD — No Action</div>
+    <div style="font-size:12px;color:rgba(255,255,255,.85);line-height:1.6">
+      No tax event this year on this position<br>
+      30-day price range (est): <b>$${priceRiskLow.toFixed(2)} — $${priceRiskHigh.toFixed(2)}</b><br>
+      Value could be: <b>$${(shares * priceRiskLow).toFixed(0).toLocaleString()} — $${(shares * priceRiskHigh).toFixed(0).toLocaleString()}</b><br>
+      <span style="color:var(--muted)">If ${ticker} recovers: you keep the upside. If it drops more: harvest opportunity expands.</span>
+    </div>
+  </div>`;
+  
+  // === Scenario C: Sell + Buy Alternative ===
+  if (gainLoss < 0) {
+    html += `<div style="background:rgba(5,150,105,.08);border:1px solid rgba(167,243,208,.25);border-radius:12px;padding:13px;margin-bottom:7px">
+      <div style="font-size:14px;font-weight:800;color:var(--green2);margin-bottom:6px">✅ SELL + BUY ALTERNATIVE (Best of Both)</div>
+      <div style="font-size:12px;color:rgba(255,255,255,.85);line-height:1.6;margin-bottom:10px">
+        Capture the <b style="color:var(--green2)">$${Math.abs(taxImpact).toFixed(0).toLocaleString()} tax saving</b> AND stay invested in the sector.<br>
+        No wash sale because different security. Rebuy ${ticker} after 31 days if you want.
+      </div>
+      <div style="font-size:11px;font-weight:700;color:var(--gold2);margin-bottom:6px">SAFE ALTERNATIVES FOR ${ticker}:</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">
+        ${alternatives.map(a => `<div style="padding:6px 11px;background:rgba(5,150,105,.15);border:1px solid rgba(167,243,208,.2);border-radius:7px;font-size:12px;font-weight:700;color:var(--green2)">${a}</div>`).join('')}
+      </div>
+      <button onclick="runAIAlternatives('${ticker}')" style="width:100%;padding:9px;background:rgba(26,79,214,.2);border:1px solid rgba(147,197,253,.3);color:#93c5fd;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif">🤖 Get Real-Time AI Suggestions</button>
+      <div id="w-ai-result" style="margin-top:8px"></div>
+    </div>`;
+  }
+  
+  // === Verdict ===
+  html += `<div style="background:linear-gradient(135deg,rgba(212,160,23,.2),rgba(217,119,6,.08));border:1.5px solid rgba(253,230,138,.35);border-radius:12px;padding:13px;margin-top:12px">
+    <div style="font-size:11px;font-weight:700;color:var(--gold2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">💡 Verdict</div>`;
+  
+  if (isLocked) {
+    html += `<div style="font-size:13px;color:#fff;line-height:1.6"><b>HOLD</b> until ${lockedUntil ? fmt(lockedUntil) : '31 days after last buy'}. Selling now triggers wash sale and wastes the tax deduction.</div>`;
+  } else if (gainLoss < -5000) {
+    html += `<div style="font-size:13px;color:#fff;line-height:1.6"><b>SELL + BUY ALTERNATIVE</b> is the winning move. You get <b style="color:var(--green2)">$${Math.abs(taxImpact).toFixed(0).toLocaleString()} in real tax savings</b> AND stay in the sector. The only risk is if ${ticker} rallies big in the next 31 days — but you can always buy it back after.</div>`;
+  } else if (gainLoss > 20000) {
+    html += `<div style="font-size:13px;color:#fff;line-height:1.6"><b>CAREFUL.</b> Selling this crystallizes <b style="color:var(--warn2)">$${taxImpact.toFixed(0).toLocaleString()} in tax</b>. Only sell if you need the cash or have big offsetting losses to harvest at the same time.</div>`;
+  } else {
+    html += `<div style="font-size:13px;color:#fff;line-height:1.6"><b>HOLD</b> looks reasonable. Tax impact is modest either way. Base your decision on whether you still believe in ${ticker}.</div>`;
+  }
+  html += `</div>`;
+  
+  resultDiv.innerHTML = html;
+}
+
+async function runAIAlternatives(ticker) {
+  const resultDiv = document.getElementById("w-ai-result");
+  if (!S.cfg.apiKey) {
+    resultDiv.innerHTML = '<div style="padding:8px;background:rgba(220,38,38,.1);border-radius:6px;color:var(--red2);font-size:11px">API key needed in Settings.</div>';
+    return;
+  }
+  resultDiv.innerHTML = '<div style="padding:8px;background:rgba(26,79,214,.1);border-radius:6px;color:#93c5fd;font-size:11px">🤖 AI analyzing market conditions...</div>';
+  
+  const lockStr = Object.entries(S.lockouts || {}).filter(([t,d]) => d >= tod()).map(([t]) => t).join(", ") || "none";
+  
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": S.cfg.apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true"
+      },
+      body: JSON.stringify({
+        model: "claude-opus-4-7",
+        max_tokens: 1000,
+        system: "You are a trading advisor. Address the user directly as 'you'. Never use 'him', 'his', 'Morris', or third-person references.",
+        messages: [{role: "user", content: 
+          `You want to sell ${ticker} to harvest a loss but need to stay in the same sector to not miss a rebound. Suggest 3 alternative stocks or ETFs to buy IMMEDIATELY today instead of ${ticker}.
+
+Requirements:
+- Same sector / similar market exposure as ${ticker}
+- NOT substantially identical to ${ticker} (so no wash sale)
+- Not in current lockouts: ${lockStr}
+- Factor in CURRENT market conditions as of right now
+
+Return ONLY JSON, no markdown:
+{"alternatives":[{"ticker":"SYM","name":"Full Name","why":"1 short sentence on current setup","price":150.25,"fit":"why this matches your ${ticker} exposure"}]}
+
+Use 'you/your' language throughout. Give 3 alternatives with CURRENT prices.`
+        }]
+      })
+    });
+    const data = await res.json();
+    const text = data.content?.[0]?.text || "{}";
+    const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+    
+    if (parsed.alternatives?.length > 0) {
+      let html = '<div style="margin-top:8px;padding:10px;background:rgba(26,79,214,.08);border-radius:8px">';
+      html += '<div style="font-size:10px;font-weight:700;color:#93c5fd;margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em">🤖 AI Real-Time Picks</div>';
+      for (const a of parsed.alternatives) {
+        html += `<div style="padding:8px;background:rgba(26,79,214,.1);border-radius:6px;margin-bottom:5px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px">
+            <span style="font-weight:800;color:#93c5fd;font-family:'Playfair Display',serif;font-size:14px">${a.ticker}</span>
+            <span style="font-size:11px;color:var(--muted)">$${a.price}</span>
+          </div>
+          <div style="font-size:11px;color:rgba(255,255,255,.85);margin-bottom:3px">${a.why}</div>
+          <div style="font-size:10px;color:var(--green2)">✓ ${a.fit}</div>
+        </div>`;
+      }
+      html += '</div>';
+      resultDiv.innerHTML = html;
+    } else {
+      resultDiv.innerHTML = '<div style="padding:8px;background:rgba(217,119,6,.1);border-radius:6px;color:var(--warn2);font-size:11px">AI returned no alternatives.</div>';
+    }
+  } catch(e) {
+    resultDiv.innerHTML = `<div style="padding:8px;background:rgba(220,38,38,.1);border-radius:6px;color:var(--red2);font-size:11px">AI error: ${e.message}</div>`;
+  }
+}
+
+
   
   // Apply email updates (estimates since last CSV import)
   let estRealizedST = r.ytd_short_term;
