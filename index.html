@@ -255,6 +255,15 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
       </div>
     </div>
 
+
+    <div class="tab" id="tab-taxes">
+      <div style="margin-bottom:10px">
+        <div style="font-family:'Playfair Display',serif;font-size:24px;font-weight:800;color:var(--gold2);margin-bottom:2px">2026 Tax Center</div>
+        <div style="font-size:12px;color:var(--muted)" id="taxes-period">Loading...</div>
+      </div>
+      <div id="taxes-wrap"><div class="empty"><div class="ei">💵</div>Import your Schwab Realized Gain/Loss CSV in Settings to see your tax picture.</div></div>
+    </div>
+
     <div class="tab" id="tab-log">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:9px;margin-top:4px">
         <div class="sec-lbl" style="margin:0">Trade History</div>
@@ -743,7 +752,14 @@ const ALTERNATIVES  = {};
 const DEFAULT_ALTS  = [{"ticker": "SPY", "reason": "S&P 500 ETF. Keeps you in the market broadly.", "sector": "ETF"}, {"ticker": "QQQ", "reason": "Nasdaq ETF. Tech and growth exposure.", "sector": "ETF"}, {"ticker": "XLK", "reason": "Technology sector ETF.", "sector": "ETF"}];
 
 // ── STATE ──────────────────────────────────────────────────────────
-let S = { trades:[], brief:null, briefDate:null, mode:"moderate", cfg:{}, conflicts:[], lockouts:{}, prices:{}, pricesUpdated:null, patterns:null, patternsDate:null, earnings:[], earningsDate:null };
+let S = { 
+  trades:[], brief:null, briefDate:null, mode:"moderate", cfg:{}, conflicts:[], lockouts:{}, 
+  prices:{}, pricesUpdated:null, patterns:null, patternsDate:null, earnings:[], earningsDate:null,
+  // Schwab authoritative data (source of truth for financials)
+  schwabRealized: null,     // {ytd_realized, ytd_short_term, ytd_long_term, ytd_disallowed, by_ticker, lots, importedAt, throughDate}
+  schwabPositions: null,    // {positions:[{ticker, shares, costBasis, ...}], importedAt}
+  schwabEmailUpdates: []    // [{ticker, action, shares, price, date}] — between-import estimates from emails
+};
 
 // ── STORAGE ────────────────────────────────────────────────────────
 const sv = (k,v) => { try{localStorage.setItem("mt_"+k, JSON.stringify(v))}catch(e){} };
@@ -796,6 +812,9 @@ async function init(){
   S.pricesUpdated = ld("pricesUpdated",null);
   S.patterns      = ld("patterns",null);
   S.patternsDate  = ld("patternsDate",null);
+  S.schwabRealized    = ld("schwabRealized", null);
+  S.schwabPositions   = ld("schwabPositions", null);
+  S.schwabEmailUpdates = ld("schwabEmailUpdates", []);
   S.earnings      = ld("earnings",[]);
   S.earningsDate  = ld("earningsDate",null);
 
@@ -832,6 +851,7 @@ async function init(){
   renderDash();
   renderTrades();
   renderStats();
+  updateSchwabStatus();
 
   // Check Gmail connection status
   updateGmailStatus();
@@ -1167,6 +1187,21 @@ function updatePortfolioCard() {
 }
 
 function buildPos(){
+  // PRIMARY: Use Schwab positions if imported (authoritative, wash-sale-adjusted cost basis)
+  if (S.schwabPositions?.positions?.length > 0) {
+    const r = {};
+    for (const p of S.schwabPositions.positions) {
+      r[p.ticker] = {
+        shares: p.shares,
+        avg: p.costBasisPerShare,
+        costBasisTotal: p.costBasisTotal,
+        source: "schwab"
+      };
+    }
+    return r;
+  }
+  // FALLBACK: Derive from trade history (inaccurate, warns user)
+  // Note: this FIFO approach double-counts when positions close and reopen
   const pos={};
   for(const t of S.trades){
     if(!pos[t.ticker]) pos[t.ticker]={shares:0,cost:0};
@@ -1174,7 +1209,7 @@ function buildPos(){
     else pos[t.ticker].shares=Math.max(0,pos[t.ticker].shares-t.shares);
   }
   const r={};
-  for(const [t,v] of Object.entries(pos)) if(v.shares>0) r[t]={shares:v.shares,avg:v.cost/v.shares};
+  for(const [t,v] of Object.entries(pos)) if(v.shares>0) r[t]={shares:v.shares,avg:v.cost/v.shares,source:"derived"};
   return r;
 }
 
@@ -1699,6 +1734,203 @@ function computeTradeStats(trades) {
   };
 }
 
+
+// ═══════════════════════════════════════════════════════════════════
+// TAXES TAB — Source of truth: Schwab Realized Gain/Loss CSV
+// ═══════════════════════════════════════════════════════════════════
+
+function computeTaxLiability(realizedST, realizedLT) {
+  // Morris is in 37% federal bracket with AGI > $250K (NIIT applies)
+  // Florida resident: no state income tax
+  const fedRateST = (S.cfg.taxBracket || 37) / 100;
+  const fedRateLT = (S.cfg.ltRate || 20) / 100;
+  const stateRate = (S.cfg.state === "Florida" || !S.cfg.state) ? 0 : 0;
+  const niitRate = 0.038;  // NIIT: 3.8% on net investment income above threshold
+
+  const fedTaxST = Math.max(0, realizedST) * fedRateST;
+  const fedTaxLT = Math.max(0, realizedLT) * fedRateLT;
+  // NIIT applies to TOTAL net investment income (gains), not just portion above threshold
+  // Assumes AGI > $250K MFJ threshold (confirmed for Morris)
+  const totalGains = Math.max(0, realizedST + realizedLT);
+  const niit = totalGains * niitRate;
+  const stateTax = Math.max(0, realizedST + realizedLT) * stateRate;
+
+  return {
+    fedTaxST, fedTaxLT, niit, stateTax,
+    total: fedTaxST + fedTaxLT + niit + stateTax,
+    fedRateST, fedRateLT, niitRate, stateRate
+  };
+}
+
+function fmtMoneyDetail(n) {
+  const abs = Math.abs(n);
+  if (abs >= 1e6) return (n < 0 ? "-" : "") + "$" + (abs/1e6).toFixed(2) + "M";
+  if (abs >= 10e3) return (n < 0 ? "-" : "") + "$" + (abs/1e3).toFixed(1) + "K";
+  return (n < 0 ? "-" : "") + "$" + Math.round(abs).toLocaleString();
+}
+
+function renderTaxes() {
+  const wrap = document.getElementById("taxes-wrap");
+  const period = document.getElementById("taxes-period");
+  if (!wrap) return;
+  
+  const r = S.schwabRealized;
+  if (!r) {
+    period.textContent = "No Schwab data imported yet";
+    wrap.innerHTML = `<div class="empty"><div class="ei">💵</div>
+      To see your tax picture, import the Schwab Realized Gain/Loss CSV.<br><br>
+      <button onclick="sw(\'dash\'); openCfg();" style="margin-top:10px;padding:11px 18px;background:var(--blue);border:none;color:#fff;border-radius:10px;font-weight:700;font-family:\'DM Sans\',sans-serif;cursor:pointer">Go to Settings</button>
+    </div>`;
+    return;
+  }
+  
+  // Apply email updates (estimates since last CSV import)
+  let estRealizedST = r.ytd_short_term;
+  let estRealizedLT = r.ytd_long_term;
+  let estDisallowed = r.ytd_disallowed;
+  let emailUpdateCount = S.schwabEmailUpdates?.length || 0;
+  
+  // Calculate tax liability
+  const baseTax = computeTaxLiability(r.ytd_short_term, r.ytd_long_term);
+  const estTax = computeTaxLiability(estRealizedST, estRealizedLT);
+  
+  // Format dates
+  const importDate = new Date(r.importedAt).toLocaleDateString();
+  period.innerHTML = `Period: <b style="color:#fff">${r.fromDate}</b> to <b style="color:#fff">${r.throughDate}</b> · Imported ${importDate}${emailUpdateCount > 0 ? ` · <span style="color:var(--warn2)">${emailUpdateCount} email updates since</span>` : ""}`;
+  
+  let html = "";
+  
+  // ═══ TOP CARDS ═══
+  html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">`;
+  
+  // Card 1: Realized Gain
+  html += `<div style="background:linear-gradient(135deg,rgba(5,150,105,.15),rgba(8,145,178,.08));border:1px solid rgba(167,243,208,.25);border-radius:13px;padding:14px">
+    <div style="font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--green2);text-transform:uppercase;margin-bottom:6px">YTD Realized Gain</div>
+    <div style="font-family:'Playfair Display',serif;font-size:26px;font-weight:800;color:${r.ytd_realized >= 0 ? 'var(--green2)' : 'var(--red2)'}">${fmtMoneyDetail(r.ytd_realized)}</div>
+    <div style="font-size:11px;color:var(--muted);margin-top:4px">Short-term: ${fmtMoneyDetail(r.ytd_short_term)}<br>Long-term: ${fmtMoneyDetail(r.ytd_long_term)}</div>
+  </div>`;
+  
+  // Card 2: Wash Sale Phantom Losses
+  html += `<div style="background:linear-gradient(135deg,rgba(220,38,38,.15),rgba(217,119,6,.08));border:1px solid rgba(252,165,165,.25);border-radius:13px;padding:14px">
+    <div style="font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--red2);text-transform:uppercase;margin-bottom:6px">Wash Sale Phantom $</div>
+    <div style="font-family:'Playfair Display',serif;font-size:26px;font-weight:800;color:var(--red2)">${fmtMoneyDetail(r.ytd_disallowed)}</div>
+    <div style="font-size:11px;color:var(--muted);margin-top:4px">${r.wash_sale_lots} lots disallowed<br>Phantom tax cost: ${fmtMoneyDetail(r.ytd_disallowed * 0.37)}</div>
+  </div>`;
+  
+  html += `</div>`;
+  
+  // ═══ TOTAL TAX BILL CARD (hero) ═══
+  html += `<div style="background:linear-gradient(135deg,rgba(212,160,23,.2),rgba(217,119,6,.1));border:1.5px solid rgba(253,230,138,.35);border-radius:15px;padding:16px;margin-bottom:12px">
+    <div style="font-size:11px;font-weight:700;letter-spacing:.08em;color:var(--gold2);text-transform:uppercase;margin-bottom:8px">📊 Estimated 2026 Tax Bill (Trading)</div>
+    <div style="font-family:'Playfair Display',serif;font-size:34px;font-weight:800;color:var(--gold2);line-height:1">${fmtMoneyDetail(baseTax.total)}</div>
+    <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08)">
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span style="color:rgba(255,255,255,.85)">Federal (ST @ ${(baseTax.fedRateST*100).toFixed(0)}%):</span><span style="color:#fff;font-weight:700">${fmtMoneyDetail(baseTax.fedTaxST)}</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span style="color:rgba(255,255,255,.85)">Federal (LT @ ${(baseTax.fedRateLT*100).toFixed(0)}%):</span><span style="color:#fff;font-weight:700">${fmtMoneyDetail(baseTax.fedTaxLT)}</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span style="color:rgba(255,255,255,.85)">NIIT (3.8% surtax):</span><span style="color:#fff;font-weight:700">${fmtMoneyDetail(baseTax.niit)}</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:rgba(255,255,255,.85)">State (FL - no tax):</span><span style="color:var(--green2);font-weight:700">$0</span></div>
+    </div>
+    <div style="font-size:10px;color:var(--muted);margin-top:8px;font-style:italic">Assumes AGI > $250K (NIIT threshold) and 37% federal bracket. Tax law assumptions - consult your CPA for filing.</div>
+  </div>`;
+  
+  // ═══ THE KEY INSIGHT BANNER ═══
+  if (r.ytd_disallowed > 1000) {
+    const phantomTax = r.ytd_disallowed * 0.37;
+    html += `<div style="background:rgba(220,38,38,.1);border-left:4px solid var(--red2);border-radius:10px;padding:12px 14px;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:700;color:var(--red2);margin-bottom:4px">💡 The Wash Sale Problem Explained</div>
+      <div style="font-size:12px;color:rgba(255,255,255,.9);line-height:1.5">You have <b>${fmtMoneyDetail(r.ytd_disallowed)}</b> of losses that you thought would reduce your tax bill — but they won't. That's because you rebought the same stocks within 30 days, which makes those losses "disallowed" for this tax year. At your 37% bracket, this costs you an extra <b style="color:var(--gold2)">${fmtMoneyDetail(phantomTax)} in taxes</b>. The losses aren't gone forever (they get added to your cost basis for next time), but you don't get the tax benefit NOW.</div>
+    </div>`;
+  }
+  
+  // ═══ PER-TICKER BREAKDOWN ═══
+  html += `<div class="sec-lbl">Per-Ticker Tax Impact</div>`;
+  const tickers = Object.entries(r.by_ticker)
+    .filter(([t, d]) => Math.abs(d.realized) > 100 || Math.abs(d.disallowed) > 100)
+    .sort((a, b) => Math.abs(b[1].realized) + Math.abs(b[1].disallowed) - (Math.abs(a[1].realized) + Math.abs(a[1].disallowed)));
+  
+  html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:11px;overflow:hidden;margin-bottom:12px">
+    <div style="display:grid;grid-template-columns:80px 50px 1fr 1fr;gap:4px;padding:10px 12px;background:rgba(255,255,255,.04);font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">
+      <div>Ticker</div><div>Lots</div><div style="text-align:right">Realized</div><div style="text-align:right">Wash Sale $</div>
+    </div>`;
+  
+  for (const [ticker, d] of tickers.slice(0, 25)) {
+    const rowBg = d.realized < -5000 ? 'rgba(220,38,38,.06)' : (d.realized > 5000 ? 'rgba(5,150,105,.06)' : 'transparent');
+    html += `<div style="display:grid;grid-template-columns:80px 50px 1fr 1fr;gap:4px;padding:9px 12px;border-top:1px solid rgba(255,255,255,.04);font-size:13px;background:${rowBg}">
+      <div style="font-weight:800;color:var(--gold2);font-family:'Playfair Display',serif">${ticker}</div>
+      <div style="color:var(--muted);font-size:11px">${d.lots}</div>
+      <div style="text-align:right;color:${d.realized >= 0 ? 'var(--green2)' : 'var(--red2)'};font-weight:700">${fmtMoneyDetail(d.realized)}</div>
+      <div style="text-align:right;color:${d.disallowed > 1000 ? 'var(--warn2)' : 'var(--muted)'};font-weight:${d.disallowed > 1000 ? '700' : '400'}">${d.disallowed > 0 ? fmtMoneyDetail(d.disallowed) : '—'}</div>
+    </div>`;
+  }
+  html += `</div>`;
+  
+  // ═══ TAX LOSS HARVEST OPPORTUNITIES ═══
+  // Scan CURRENT positions for unrealized losses > $5K
+  const harvestOpps = [];
+  if (S.schwabPositions?.positions?.length > 0) {
+    for (const p of S.schwabPositions.positions) {
+      const live = S.prices?.[p.ticker];
+      if (!live) continue;
+      const currentVal = p.shares * live.current;
+      const loss = currentVal - p.costBasisTotal;
+      const lossPct = p.costBasisTotal > 0 ? (loss / p.costBasisTotal) * 100 : 0;
+      if (loss < -5000) {
+        // Check wash sale safety
+        const hasRecentBuy = S.trades.some(t => 
+          t.ticker === p.ticker && t.action === "BUY" && 
+          dbet(t.date, tod()) <= 30
+        );
+        const lockedUntil = S.lockouts?.[p.ticker];
+        const safeToday = !hasRecentBuy && (!lockedUntil || lockedUntil < tod());
+        const taxSaved = Math.abs(loss) * 0.37;
+        harvestOpps.push({
+          ticker: p.ticker, loss, lossPct, 
+          hasRecentBuy, lockedUntil, safeToday,
+          taxSaved, shares: p.shares, currentPrice: live.current, costBasis: p.costBasisPerShare
+        });
+      }
+    }
+  }
+  
+  if (harvestOpps.length > 0) {
+    harvestOpps.sort((a,b) => a.loss - b.loss);
+    html += `<div class="sec-lbl">🎯 Tax-Loss Harvest Opportunities</div>`;
+    html += `<div style="font-size:12px;color:var(--muted);margin-bottom:9px;line-height:1.5">Selling these at a loss could offset gains and lower your tax bill — but only if you don't rebuy within 30 days.</div>`;
+    
+    for (const opp of harvestOpps.slice(0, 6)) {
+      const safetyBanner = opp.safeToday
+        ? `<div style="background:rgba(5,150,105,.15);padding:7px 10px;border-radius:7px;font-size:11px;color:var(--green2);margin-top:8px"><b>✅ Safe to harvest today.</b> Would save est. ${fmtMoneyDetail(opp.taxSaved)} in tax. Don't rebuy for 31 days.</div>`
+        : `<div style="background:rgba(220,38,38,.15);padding:7px 10px;border-radius:7px;font-size:11px;color:var(--red2);margin-top:8px"><b>⚠️ NOT safe today.</b> You bought within 30 days. Selling now would wash sale again.</div>`;
+      
+      html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:13px;padding:13px;margin-bottom:7px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+          <div>
+            <div style="font-family:'Playfair Display',serif;font-size:20px;font-weight:800;color:var(--gold2)">${opp.ticker}</div>
+            <div style="font-size:11px;color:var(--muted)">${opp.shares.toLocaleString()} shares @ $${opp.costBasis.toFixed(2)} avg cost</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:15px;font-weight:800;color:var(--red2)">${fmtMoneyDetail(opp.loss)}</div>
+            <div style="font-size:11px;color:var(--muted)">${opp.lossPct.toFixed(1)}% down</div>
+          </div>
+        </div>
+        <div style="font-size:12px;color:rgba(255,255,255,.85)">Current: $${opp.currentPrice.toFixed(2)} · Position value: $${(opp.shares * opp.currentPrice).toFixed(0).toLocaleString()}</div>
+        ${safetyBanner}
+      </div>`;
+    }
+  }
+  
+  // ═══ UPDATE HISTORY ═══
+  html += `<div class="sec-lbl" style="margin-top:14px">Data Freshness</div>
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:11px;padding:12px;font-size:12px;color:rgba(255,255,255,.85);line-height:1.7">
+    <div>📥 Last CSV import: <b style="color:#fff">${importDate}</b></div>
+    <div>📧 Email updates since: <b style="color:#fff">${emailUpdateCount}</b> ${emailUpdateCount === 0 ? '<span style="color:var(--muted)">(waiting for Schwab emails to arrive)</span>' : ''}</div>
+    <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.08);color:var(--muted);font-size:11px">Re-import the Schwab CSV weekly to keep numbers authoritative. Between imports, Schwab trade confirmation emails update YTD estimates automatically.</div>
+  </div>`;
+  
+  wrap.innerHTML = html;
+}
+
+
+
 function renderInsights() {
   const wrap = document.getElementById("insights-wrap");
   const p = S.patterns;
@@ -1826,27 +2058,43 @@ function renderPlaybook() {
     });
   }
   
-  // Item 4: Big unrealized losses flag
+  // Item 4: Tax-loss harvest opportunities (ONLY from Schwab authoritative data)
+  // Do not surface suggestions from derived FIFO — that math is unreliable
   const pos = buildPos();
   const bigLosses = [];
-  for (const [ticker, holding] of Object.entries(pos)) {
-    if (holding.shares <= 0) continue;
-    const live = S.prices?.[ticker];
-    if (!live) continue;
-    const currentVal = holding.shares * live.current;
-    const cost = holding.shares * holding.avg;
-    const loss = currentVal - cost;
-    const lossPct = (loss / cost) * 100;
-    if (lossPct < -20 && Math.abs(loss) > 10000) {
-      bigLosses.push({ticker, loss, lossPct});
+  if (S.schwabPositions?.positions?.length > 0) {
+    // We have Schwab data, so cost basis is trustworthy
+    for (const [ticker, holding] of Object.entries(pos)) {
+      if (holding.shares <= 0) continue;
+      if (holding.source !== "schwab") continue; // Safety: only Schwab-sourced positions
+      const live = S.prices?.[ticker];
+      if (!live) continue;
+      const currentVal = holding.shares * live.current;
+      const cost = holding.costBasisTotal || holding.shares * holding.avg;
+      const loss = currentVal - cost;
+      const lossPct = cost > 0 ? (loss / cost) * 100 : 0;
+      // Realistic thresholds: >10% down AND >$5K loss
+      if (lossPct < -10 && Math.abs(loss) > 5000) {
+        // Check if buying this ticker recently (would create wash sale on harvest)
+        const hasRecentBuy = S.trades.some(t => 
+          t.ticker === ticker && t.action === "BUY" && 
+          dbet(t.date, tod()) <= 30
+        );
+        const lockedUntil = S.lockouts?.[ticker];
+        bigLosses.push({ticker, loss, lossPct, hasRecentBuy, lockedUntil});
+      }
     }
   }
   if (bigLosses.length > 0) {
     bigLosses.sort((a,b) => a.loss - b.loss);
     const b = bigLosses[0];
+    const safeToday = !b.hasRecentBuy && (!b.lockedUntil || b.lockedUntil < tod());
+    const safetyMsg = safeToday 
+      ? "Safe to harvest today." 
+      : "⚠️ Recent buy within 30 days — would trigger wash sale.";
     items.push({
       icon: "📉",
-      text: `<b>${b.ticker}</b> is down ${b.lossPct.toFixed(0)}% ($${Math.abs(b.loss/1000).toFixed(0)}K) — consider tax-loss harvesting after checking wash sale rules`
+      text: `<b>${b.ticker}</b> is down ${b.lossPct.toFixed(0)}% ($${Math.abs(b.loss/1000).toFixed(0)}K unrealized loss). ${safetyMsg} Check Taxes tab.`
     });
   }
   
@@ -2408,6 +2656,7 @@ async function refreshAll(){
   renderDash();
   renderTrades();
   renderStats();
+  updateSchwabStatus();
   // Don't auto-generate brief on refresh — user taps Generate button instead
   ic.style.animation = "";
 }
@@ -2438,6 +2687,8 @@ function sw(tab){
   if (tabEl) tabEl.classList.add("active");
   const navEl = document.getElementById("nb-"+tab);
   if (navEl) navEl.classList.add("active");
+  // Trigger render on tab open
+  if (tab === "taxes" && typeof renderTaxes === "function") renderTaxes();
   // Scroll to top on tab change
   window.scrollTo(0,0);
 }
@@ -2538,6 +2789,302 @@ function sanitizeVoice(obj) {
   }
   return obj;
 }
+
+
+// ═══════════════════════════════════════════════════════════════════
+// SCHWAB CSV IMPORT — Source of truth for financials
+// ═══════════════════════════════════════════════════════════════════
+
+function parseSchwabMoney(val) {
+  if (!val || val === '--' || val === '') return 0;
+  const s = String(val).replace(/[$,\s"]/g, '').trim();
+  const n = parseFloat(s);
+  return isNaN(n) ? 0 : n;
+}
+
+function parseSchwabQty(val) {
+  if (!val || val === '') return 0;
+  const s = String(val).replace(/[,\s"]/g, '').trim();
+  const n = parseFloat(s);
+  return isNaN(n) ? 0 : n;
+}
+
+function parseCSVLine(line) {
+  // Handle CSV with quoted fields that may contain commas
+  const result = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') {
+      inQuotes = !inQuotes;
+    } else if (c === ',' && !inQuotes) {
+      result.push(current);
+      current = '';
+    } else {
+      current += c;
+    }
+  }
+  result.push(current);
+  return result.map(s => s.trim().replace(/^"|"$/g, ''));
+}
+
+// Parse Schwab "Realized Gain/Loss Details" CSV
+// Format: row 0 = report title, row 1 = column headers, rows 2+ = lot-level data
+function parseSchwabRealizedCSV(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 3) throw new Error("CSV has too few rows");
+  
+  // First line contains report title like "Realized Gain/Loss for X for MM/DD/YYYY to MM/DD/YYYY"
+  const title = lines[0];
+  const dateMatch = title.match(/(\d{2}\/\d{2}\/\d{4})\s+to\s+(\d{2}\/\d{2}\/\d{4})/);
+  const fromDate = dateMatch ? dateMatch[1] : null;
+  const throughDate = dateMatch ? dateMatch[2] : null;
+  
+  // Second line is column headers
+  const headers = parseCSVLine(lines[1]);
+  const col = (name) => headers.findIndex(h => h.toLowerCase().includes(name.toLowerCase()));
+  
+  const idx = {
+    symbol: col('Symbol'),
+    closedDate: col('Closed Date'),
+    openedDate: col('Opened Date'),
+    quantity: col('Quantity'),
+    proceeds: col('Proceeds'),
+    costBasis: col('Cost Basis (CB)'),
+    gainLoss: col('Gain/Loss ($)'),
+    longTerm: col('Long Term Gain/Loss'),
+    shortTerm: col('Short Term Gain/Loss'),
+    term: col('Term'),
+    washSale: col('Wash Sale?'),
+    disallowedLoss: col('Disallowed Loss')
+  };
+  
+  if (idx.symbol < 0 || idx.gainLoss < 0) {
+    throw new Error("CSV missing required columns (Symbol, Gain/Loss). Make sure you exported 'Export Details Only' from Schwab.");
+  }
+  
+  const lots = [];
+  for (let i = 2; i < lines.length; i++) {
+    const fields = parseCSVLine(lines[i]);
+    if (fields.length < 3) continue;
+    const symbol = fields[idx.symbol];
+    if (!symbol || symbol === 'Symbol') continue; // Skip blank or re-header
+    
+    lots.push({
+      ticker: symbol,
+      closedDate: fields[idx.closedDate] || '',
+      openedDate: fields[idx.openedDate] || '',
+      quantity: parseSchwabQty(fields[idx.quantity]),
+      proceeds: parseSchwabMoney(fields[idx.proceeds]),
+      costBasis: parseSchwabMoney(fields[idx.costBasis]),
+      gainLoss: parseSchwabMoney(fields[idx.gainLoss]),
+      longTerm: parseSchwabMoney(fields[idx.longTerm]),
+      shortTerm: parseSchwabMoney(fields[idx.shortTerm]),
+      term: fields[idx.term] || '',
+      washSale: (fields[idx.washSale] || '').toLowerCase() === 'yes',
+      disallowedLoss: parseSchwabMoney(fields[idx.disallowedLoss])
+    });
+  }
+  
+  // Rollup totals
+  let totalRealized = 0, totalST = 0, totalLT = 0, totalProceeds = 0, totalCost = 0, totalDisallowed = 0;
+  let washSaleLots = 0;
+  const byTicker = {};
+  
+  for (const lot of lots) {
+    totalRealized += lot.gainLoss;
+    totalST += lot.shortTerm;
+    totalLT += lot.longTerm;
+    totalProceeds += lot.proceeds;
+    totalCost += lot.costBasis;
+    totalDisallowed += lot.disallowedLoss;
+    if (lot.washSale) washSaleLots++;
+    
+    if (!byTicker[lot.ticker]) {
+      byTicker[lot.ticker] = {realized:0, disallowed:0, shortTerm:0, longTerm:0, lots:0, washSaleLots:0};
+    }
+    byTicker[lot.ticker].realized += lot.gainLoss;
+    byTicker[lot.ticker].disallowed += lot.disallowedLoss;
+    byTicker[lot.ticker].shortTerm += lot.shortTerm;
+    byTicker[lot.ticker].longTerm += lot.longTerm;
+    byTicker[lot.ticker].lots++;
+    if (lot.washSale) byTicker[lot.ticker].washSaleLots++;
+  }
+  
+  return {
+    fromDate, throughDate,
+    importedAt: new Date().toISOString(),
+    ytd_realized: totalRealized,
+    ytd_short_term: totalST,
+    ytd_long_term: totalLT,
+    ytd_proceeds: totalProceeds,
+    ytd_cost_basis: totalCost,
+    ytd_disallowed: totalDisallowed,
+    wash_sale_lots: washSaleLots,
+    total_lots: lots.length,
+    by_ticker: byTicker,
+    lots: lots  // Keep detailed lots for drill-down
+  };
+}
+
+// Parse Schwab "Positions" CSV — current holdings with cost basis
+function parseSchwabPositionsCSV(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 3) throw new Error("Positions CSV has too few rows");
+  
+  // Find the header row — Schwab positions CSV has some preamble
+  let headerIdx = -1;
+  for (let i = 0; i < Math.min(10, lines.length); i++) {
+    const fields = parseCSVLine(lines[i]);
+    if (fields.some(f => f.toLowerCase() === 'symbol') && 
+        fields.some(f => f.toLowerCase().includes('quantity'))) {
+      headerIdx = i;
+      break;
+    }
+  }
+  if (headerIdx < 0) throw new Error("Could not find header row in Positions CSV");
+  
+  const headers = parseCSVLine(lines[headerIdx]);
+  const col = (name) => headers.findIndex(h => h.toLowerCase().includes(name.toLowerCase()));
+  
+  const idx = {
+    symbol: col('Symbol'),
+    quantity: col('Quantity'),
+    price: col('Price'),
+    marketValue: col('Market Value'),
+    costBasis: col('Cost Basis'),
+    dayChange: col('Day Change $'),
+    gainLossDollar: col('Gain % / $'),
+    description: col('Description')
+  };
+  
+  if (idx.symbol < 0) throw new Error("Positions CSV missing Symbol column");
+  
+  const positions = [];
+  for (let i = headerIdx + 1; i < lines.length; i++) {
+    const fields = parseCSVLine(lines[i]);
+    if (fields.length < 3) continue;
+    const symbol = fields[idx.symbol];
+    if (!symbol || symbol === 'Symbol' || symbol.toLowerCase().includes('cash') || 
+        symbol.toLowerCase().includes('total') || symbol.toLowerCase().includes('account')) continue;
+    
+    const qty = parseSchwabQty(fields[idx.quantity]);
+    if (qty <= 0) continue;
+    
+    const costBasisTotal = parseSchwabMoney(fields[idx.costBasis]);
+    positions.push({
+      ticker: symbol.toUpperCase(),
+      shares: qty,
+      costBasisTotal: costBasisTotal,
+      costBasisPerShare: qty > 0 ? costBasisTotal / qty : 0,
+      marketValue: parseSchwabMoney(fields[idx.marketValue]),
+      currentPrice: parseSchwabMoney(fields[idx.price]),
+      description: fields[idx.description] || ''
+    });
+  }
+  
+  return {
+    positions: positions,
+    importedAt: new Date().toISOString()
+  };
+}
+
+
+function updateSchwabStatus() {
+  const rStatus = document.getElementById("schwab-realized-status");
+  const pStatus = document.getElementById("schwab-positions-status");
+  if (rStatus) {
+    if (S.schwabRealized) {
+      const when = new Date(S.schwabRealized.importedAt).toLocaleDateString();
+      rStatus.innerHTML = `<span style="color:var(--green2)">✓ Imported ${when}</span> · ${S.schwabRealized.total_lots} lots · YTD $${S.schwabRealized.ytd_realized.toFixed(0).toLocaleString()} realized, ${S.schwabEmailUpdates.length} email updates since`;
+    } else {
+      rStatus.innerHTML = `<span style="color:var(--warn2)">⚠️ Not imported — dashboard numbers will be estimates</span>`;
+    }
+  }
+  if (pStatus) {
+    if (S.schwabPositions) {
+      const when = new Date(S.schwabPositions.importedAt).toLocaleDateString();
+      pStatus.innerHTML = `<span style="color:var(--green2)">✓ Imported ${when}</span> · ${S.schwabPositions.positions.length} positions`;
+    } else {
+      pStatus.innerHTML = `<span style="color:var(--warn2)">⚠️ Not imported</span>`;
+    }
+  }
+}
+
+async function importSchwabRealized() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.csv,text/csv';
+  input.onchange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = parseSchwabRealizedCSV(text);
+      S.schwabRealized = parsed;
+      sv("schwabRealized", parsed);
+      // Reset email updates since we now have fresh source of truth
+      S.schwabEmailUpdates = [];
+      sv("schwabEmailUpdates", []);
+      
+      const msg = `✅ Imported Schwab Realized G/L
+      
+Period: ${parsed.fromDate} to ${parsed.throughDate}
+Lots: ${parsed.total_lots}
+YTD Realized: $${parsed.ytd_realized.toFixed(2)}
+  Short-term: $${parsed.ytd_short_term.toFixed(2)}
+  Long-term: $${parsed.ytd_long_term.toFixed(2)}
+Wash sale disallowed: $${parsed.ytd_disallowed.toFixed(2)}
+Wash sale lots: ${parsed.wash_sale_lots}`;
+      alert(msg);
+      updateSchwabStatus();
+      
+      // Refresh all views
+      computeWS();
+      renderDash();
+      if (typeof renderTaxes === 'function') renderTaxes();
+    } catch (err) {
+      alert("Import failed: " + err.message);
+      console.error(err);
+    }
+  };
+  input.click();
+}
+
+async function importSchwabPositions() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.csv,text/csv';
+  input.onchange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = parseSchwabPositionsCSV(text);
+      S.schwabPositions = parsed;
+      sv("schwabPositions", parsed);
+      
+      const totalVal = parsed.positions.reduce((s,p) => s + p.marketValue, 0);
+      const totalCost = parsed.positions.reduce((s,p) => s + p.costBasisTotal, 0);
+      alert(`✅ Imported ${parsed.positions.length} positions
+Total market value: $${totalVal.toFixed(0).toLocaleString()}
+Total cost basis: $${totalCost.toFixed(0).toLocaleString()}
+Unrealized G/L: $${(totalVal - totalCost).toFixed(0).toLocaleString()}`);
+      updateSchwabStatus();
+      
+      computeWS();
+      renderDash();
+      if (typeof renderTaxes === 'function') renderTaxes();
+    } catch (err) {
+      alert("Import failed: " + err.message);
+      console.error(err);
+    }
+  };
+  input.click();
+}
+
+
 
 // ── OPPORTUNITY SCANNER ──
 async function runOpportunityScanner() {
