@@ -253,6 +253,19 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
         <button class="c-btn" onclick="checkTradeAdvanced()">🔍 Full Analysis</button>
         <div id="c-result"></div>
       </div>
+      
+      <div style="margin-top:16px">
+        <div class="sec-lbl">💰 Is It Worth It? — Sell vs Hold Calculator</div>
+        <div class="check-card">
+          <div style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5">Compare 3 scenarios for a position you own. Answers the question: "Should I sell to capture a loss, or just hold?"</div>
+          <div class="check-row">
+            <input class="c-input" id="w-ticker" placeholder="Ticker you own" maxlength="6" oninput="this.value=this.value.toUpperCase();autofillWorthIt()">
+            <input class="c-input" id="w-shares" type="number" placeholder="Shares to sell" style="font-size:14px">
+          </div>
+          <button class="c-btn" onclick="runWorthIt()" style="margin-top:8px">🧮 Calculate Worth It</button>
+          <div id="w-result" style="margin-top:10px"></div>
+        </div>
+      </div>
     </div>
 
 
@@ -270,6 +283,10 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
         <button onclick="toggleForm()" style="background:var(--card);border:1px solid var(--border);color:var(--muted);border-radius:9px;padding:7px 13px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif">+ Add</button>
       </div>
       <div class="add-form" id="add-form">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div style="font-size:13px;font-weight:700;color:var(--gold2)">New Trade</div>
+          <button onclick="toggleForm()" style="background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif">✕ Cancel</button>
+        </div>
         <div class="fg">
           <div class="ff"><label>Ticker</label><input id="f-t" placeholder="AMD" oninput="this.value=this.value.toUpperCase()"></div>
           <div class="ff"><label>Date</label><input id="f-d" type="date"></div>
@@ -365,6 +382,23 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
       </div>
 
       <div class="cfg-card">
+        <div class="cfg-title">📊 Schwab Import (Source of Truth)</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.6">
+          Import authoritative data from Schwab. These drive the Taxes tab and fix financial displays.
+        </div>
+        <button onclick="importSchwabRealized()" style="width:100%;padding:11px;background:rgba(212,160,23,.15);border:1px solid rgba(253,230,138,.3);color:var(--gold2);border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;margin-bottom:7px">💰 Import Realized Gain/Loss CSV</button>
+        <div id="schwab-realized-status" style="font-size:11px;color:var(--muted);margin-bottom:10px">Not imported yet</div>
+        <button onclick="importSchwabPositions()" style="width:100%;padding:11px;background:rgba(26,79,214,.15);border:1px solid rgba(147,197,253,.3);color:#93c5fd;border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;margin-bottom:7px">📋 Import Positions CSV</button>
+        <div id="schwab-positions-status" style="font-size:11px;color:var(--muted);margin-bottom:10px">Not imported yet</div>
+        <div style="font-size:11px;color:var(--muted);padding:10px;background:rgba(255,255,255,.04);border-radius:8px;line-height:1.5">
+          <b style="color:var(--gold2)">How to export from Schwab:</b><br>
+          1. schwab.com → Accounts → Realized Gain/Loss → Export → choose <b>"Export Details Only"</b><br>
+          2. Accounts → Positions → Export<br>
+          Re-import weekly for fresh numbers.
+        </div>
+      </div>
+
+      <div class="cfg-card">
         <div class="cfg-title">Trade Data</div>
         <div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.6">
           Trade history is stored privately on this device. Use Import to load history from a backup, or Export to save it.
@@ -407,6 +441,7 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
   <button class="ni2 active" onclick="sw('dash')" id="nb-dash"><span class="nico">📊</span><span class="nlbl">Home</span><div class="ndot"></div></button>
   <button class="ni2" onclick="sw('brief')" id="nb-brief"><span class="nico">🌅</span><span class="nlbl">Brief</span><div class="ndot"></div></button>
   <button class="ni2" onclick="sw('check')" id="nb-check"><span class="nico">🔍</span><span class="nlbl">Check</span><div class="ndot"></div></button>
+  <button class="ni2" onclick="sw('taxes')" id="nb-taxes"><span class="nico">💵</span><span class="nlbl">Taxes</span><div class="ndot"></div></button>
   <button class="ni2" onclick="sw('cal')" id="nb-cal"><span class="nico">📅</span><span class="nlbl">Calendar</span><div class="ndot"></div></button>
   <button class="ni2" onclick="sw('insights')" id="nb-insights"><span class="nico">💡</span><span class="nlbl">Insights</span><div class="ndot"></div></button>
   <button class="ni2" onclick="sw('log')" id="nb-log"><span class="nico">📋</span><span class="nlbl">Trades</span><div class="ndot"></div></button>
@@ -460,6 +495,134 @@ function getGmailToken() {
 function isGmailConnected() {
   return !!getGmailToken();
 }
+
+
+// ═══════════════════════════════════════════════════════════════════
+// SCHWAB EMAIL READER — Parses Schwab trade confirmation emails
+// Updates S.schwabEmailUpdates between CSV imports (estimates)
+// ═══════════════════════════════════════════════════════════════════
+
+async function readSchwabEmails() {
+  const token = getGmailToken();
+  if (!token) return;
+  if (!S.cfg.apiKey) return;
+  
+  // Only read emails newer than the last CSV import
+  const sinceDate = S.schwabRealized?.importedAt 
+    ? new Date(S.schwabRealized.importedAt).toISOString().split("T")[0].replace(/-/g, "/")
+    : new Date(Date.now() - 30*86400000).toISOString().split("T")[0].replace(/-/g, "/");
+  
+  // Search Gmail for Schwab trade confirmations since last import
+  const query = `from:schwab.com after:${sinceDate} subject:(trade OR confirmation OR executed OR order)`;
+  const listUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=50`;
+  
+  try {
+    const listRes = await fetch(listUrl, {headers: {"Authorization": `Bearer ${token}`}});
+    const listData = await listRes.json();
+    const messages = listData.messages || [];
+    if (messages.length === 0) return;
+    
+    // Get already-processed message IDs to avoid duplicates
+    const processedIds = new Set(S.schwabEmailUpdates.map(u => u.messageId));
+    const newMessages = messages.filter(m => !processedIds.has(m.id));
+    if (newMessages.length === 0) return;
+    
+    const updates = [];
+    for (const m of newMessages.slice(0, 20)) {  // Cap at 20 per refresh
+      // Fetch full message
+      const msgRes = await fetch(
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=full`,
+        {headers: {"Authorization": `Bearer ${token}`}}
+      );
+      const msg = await msgRes.json();
+      
+      // Extract body text
+      let bodyText = "";
+      function extractBody(part) {
+        if (part.body?.data) {
+          try {
+            bodyText += atob(part.body.data.replace(/-/g, "+").replace(/_/g, "/"));
+          } catch(e) {}
+        }
+        if (part.parts) part.parts.forEach(extractBody);
+      }
+      extractBody(msg.payload);
+      
+      // Get subject and date
+      const headers = msg.payload?.headers || [];
+      const subject = headers.find(h => h.name === "Subject")?.value || "";
+      const dateHeader = headers.find(h => h.name === "Date")?.value;
+      const msgDate = dateHeader ? new Date(dateHeader).toISOString().split("T")[0] : "";
+      
+      // Strip HTML and limit to 3000 chars for AI parsing
+      const cleanText = bodyText.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 3000);
+      
+      if (cleanText.length < 50) continue;
+      
+      // Ask Claude to extract trade details
+      try {
+        const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": S.cfg.apiKey,
+            "anthropic-version": "2023-06-01",
+            "anthropic-dangerous-direct-browser-access": "true"
+          },
+          body: JSON.stringify({
+            model: "claude-opus-4-7",
+            max_tokens: 500,
+            system: "You extract trade data from Schwab emails. Return ONLY valid JSON with no markdown.",
+            messages: [{role: "user", content: 
+              `Extract trade(s) from this Schwab email. Subject: "${subject}". Date: ${msgDate}.
+              
+Email body:
+${cleanText}
+
+Return JSON: {"trades":[{"ticker":"SYMBOL","action":"BUY|SELL","shares":100,"price":45.67,"proceeds":4567,"date":"YYYY-MM-DD"}]}
+
+If no trade info visible, return {"trades":[]}. If multiple trades, include all.`
+            }]
+          })
+        });
+        const aiData = await aiRes.json();
+        const text = aiData.content?.[0]?.text || "{}";
+        const parsed = JSON.parse(text.replace(/\`\`\`json|\`\`\`/g, "").trim());
+        
+        if (parsed.trades?.length > 0) {
+          for (const t of parsed.trades) {
+            updates.push({
+              messageId: m.id,
+              ticker: t.ticker,
+              action: t.action,
+              shares: t.shares,
+              price: t.price,
+              proceeds: t.proceeds || (t.shares * t.price),
+              date: t.date || msgDate,
+              parsedAt: new Date().toISOString(),
+              source: "schwab-email-estimate"
+            });
+          }
+        }
+      } catch (err) {
+        console.log(`Email parse failed for ${m.id}:`, err);
+      }
+    }
+    
+    if (updates.length > 0) {
+      S.schwabEmailUpdates = [...S.schwabEmailUpdates, ...updates];
+      sv("schwabEmailUpdates", S.schwabEmailUpdates);
+      console.log(`Parsed ${updates.length} trade updates from Schwab emails`);
+      // Re-render if taxes tab is visible
+      if (typeof renderTaxes === "function") renderTaxes();
+      updateSchwabStatus();
+    }
+  } catch (err) {
+    console.log("Schwab email read failed:", err);
+  }
+}
+
+
 
 
 // ══════════════════════════════════════════════════════════════════
@@ -865,6 +1028,38 @@ async function init(){
 // ── WASH SALE ENGINE ───────────────────────────────────────────────
 function computeWS(){
   S.conflicts=[]; const lockMap={};
+  
+  // PRIMARY: Use Schwab Realized data if imported — it has authoritative wash sale flags
+  if (S.schwabRealized?.lots?.length > 0) {
+    for (const lot of S.schwabRealized.lots) {
+      if (!lot.washSale) continue;
+      // Build a conflict entry matching original format
+      const loss = -Math.abs(lot.disallowedLoss);
+      S.conflicts.push({
+        sid: "schwab-" + lot.ticker + "-" + lot.closedDate,
+        bid: "schwab-" + lot.ticker + "-" + lot.openedDate,
+        ticker: lot.ticker,
+        sellDate: lot.closedDate,
+        buyDate: lot.openedDate,
+        days: 0,
+        loss: loss,
+        tax: Math.abs(loss) * 0.37,
+        safe: lot.closedDate
+      });
+      // Don't add future lockouts — those only matter for upcoming sells, and Schwab data is historical
+    }
+    // Still compute future lockouts from recent trades (within last 30 days)
+    const recentSells = S.trades.filter(t => t.action === "SELL" && t.gain_loss < 0 && dbet(t.date, tod()) <= 30);
+    for (const sell of recentSells) {
+      const safe = dadd(sell.date, 31);
+      if (!lockMap[sell.ticker] || lockMap[sell.ticker] < safe) lockMap[sell.ticker] = safe;
+    }
+    S.lockouts = Object.assign({}, SEED_LOCKOUTS, lockMap);
+    sv("lockouts", lockMap);
+    return;
+  }
+  
+  // FALLBACK: Compute from trade history when no Schwab data (less accurate)
   const sells=S.trades.filter(t=>t.action==="SELL"&&t.gain_loss<0);
   const buys =S.trades.filter(t=>t.action==="BUY");
   for(const sell of sells){
@@ -1388,8 +1583,10 @@ function renderPortfolio() {
   const topLosses = losses.slice(0,4).map(l => `${l.ticker} ${fmtMoney(l.amount)}`).join(" · ");
   const topGains = gains.slice(0,3).map(g => `${g.ticker} +${fmtMoney(g.amount)}`).join(" · ");
   let highlights = "";
-  if (losses.length) highlights = `⚠️ Biggest losses: ${topLosses}`;
-  if (gains.length && S.prices && Object.keys(S.prices).length) highlights += (highlights ? " | " : "") + `🚀 Best: ${topGains}`;
+  const hasSchwab = S.schwabPositions?.positions?.length > 0;
+  if (hasSchwab && losses.length) highlights = `⚠️ Biggest losses: ${topLosses}`;
+  if (hasSchwab && gains.length && S.prices && Object.keys(S.prices).length) highlights += (highlights ? " | " : "") + `🚀 Best: ${topGains}`;
+  if (!hasSchwab) highlights = `<span style="color:var(--warn2)">⚠️ Import Schwab data in Settings for accurate numbers</span>`;
   document.getElementById("port-highlights").innerHTML = highlights || "No positions yet";
   
   // Age of prices
@@ -2641,6 +2838,7 @@ function addManual(){
 
 async function refreshAll(){
   S.cfg = ld("cfg", S.cfg);  // Refresh config from localStorage
+  readSchwabEmails().catch(e => console.log("schwab email read:", e));
   const ic = document.getElementById("rico");
   ic.style.animation = "spin .5s linear infinite";
   
