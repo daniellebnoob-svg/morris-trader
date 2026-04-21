@@ -1105,10 +1105,19 @@ function computeWS(){
       // Don't add future lockouts — those only matter for upcoming sells, and Schwab data is historical
     }
     // Still compute future lockouts from recent trades (within last 30 days)
-    const recentSells = S.trades.filter(t => t.action === "SELL" && t.gain_loss < 0 && dbet(t.date, tod()) <= 30);
+    // A lockout means: you cannot sell this ticker at a loss without triggering a wash sale.
+    // This happens if you've either: (a) sold at loss within 30 days, OR (b) bought within 30 days.
+    const todayISO = tod();
+    const recentSells = S.trades.filter(t => t.action === "SELL" && t.gain_loss < 0 && dbet(t.date, todayISO) <= 30);
     for (const sell of recentSells) {
       const safe = dadd(sell.date, 31);
       if (!lockMap[sell.ticker] || lockMap[sell.ticker] < safe) lockMap[sell.ticker] = safe;
+    }
+    // IMPORTANT: Recent BUYS also lock the ticker (you can't sell at loss within 30 days of buying)
+    const recentBuys = S.trades.filter(t => t.action === "BUY" && dbet(t.date, todayISO) <= 30);
+    for (const buy of recentBuys) {
+      const safe = dadd(buy.date, 31);
+      if (!lockMap[buy.ticker] || lockMap[buy.ticker] < safe) lockMap[buy.ticker] = safe;
     }
     S.lockouts = Object.assign({}, SEED_LOCKOUTS, lockMap);
     sv("lockouts", lockMap);
@@ -2571,10 +2580,12 @@ Use 'you/your' language throughout. Give 3 alternatives with CURRENT prices.`
       let html = '<div style="margin-top:8px;padding:10px;background:rgba(26,79,214,.08);border-radius:8px">';
       html += '<div style="font-size:10px;font-weight:700;color:#93c5fd;margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em">🤖 AI Real-Time Picks</div>';
       for (const a of parsed.alternatives) {
+        const altLive = S.prices && S.prices[a.ticker];
+        const altPriceStr = altLive?.current ? "$" + altLive.current.toFixed(2) : "—";
         html += `<div style="padding:8px;background:rgba(26,79,214,.1);border-radius:6px;margin-bottom:5px">
           <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px">
             <span style="font-weight:800;color:#93c5fd;font-family:'Playfair Display',serif;font-size:14px">${a.ticker}</span>
-            <span style="font-size:11px;color:var(--muted)">$${a.price}</span>
+            <span style="font-size:11px;color:var(--muted)">${altPriceStr}</span>
           </div>
           <div style="font-size:11px;color:rgba(255,255,255,.85);margin-bottom:3px">${a.why}</div>
           <div style="font-size:10px;color:var(--green2)">✓ ${a.fit}</div>
@@ -2903,8 +2914,26 @@ function renderBrief(){
   }
 
   // Filter out hallucinated SELL/HOLD recommendations (tickers not actually held)
+  // AND override AI's wash_risk claim with REAL lockout check
+  const today = tod();
+  function isTickerWashSaleLocked(ticker) {
+    // Check S.lockouts (from Schwab Realized CSV + recent trades)
+    const safeDate = S.lockouts && S.lockouts[ticker];
+    if (safeDate && safeDate >= today) return {locked: true, safeAfter: safeDate};
+    // Also check: any recent BUY on this ticker within 30 days from S.trades
+    if (S.trades) {
+      const recentBuy = S.trades.find(t => t.ticker === ticker && t.action === "BUY" && dbet(today, t.date) <= 30);
+      if (recentBuy) {
+        const safeAfter = dadd(recentBuy.date, 31);
+        return {locked: true, safeAfter: safeAfter};
+      }
+    }
+    return {locked: false};
+  }
+  
   let trades="";
   let filteredCount = 0;
+  let overriddenLockCount = 0;
   for(const t of (mdata.trades||[])){
     const ac=(t.action||"HOLD").toLowerCase();
     // SELL and HOLD only make sense on positions you actually own
@@ -2913,13 +2942,33 @@ function renderBrief(){
       console.warn(`Brief recommended ${t.action} ${t.ticker} but you don't hold it — filtered`);
       continue;
     }
+    // Override AI's wash_risk: check real lockouts ourselves
+    let realWashRisk = t.wash_risk === true;
+    let lockOverride = null;
+    if (ac === "sell") {
+      const lockCheck = isTickerWashSaleLocked(t.ticker);
+      if (lockCheck.locked) {
+        realWashRisk = true;
+        lockOverride = lockCheck.safeAfter;
+        if (!t.wash_risk) {
+          overriddenLockCount++;
+          console.warn(`Brief said ${t.ticker} not wash-locked but actually locked until ${lockCheck.safeAfter}`);
+        }
+      }
+    }
     const livePriceStr = getLivePrice(t.ticker);
-    trades += `<div class="sug-card${t.wash_risk?" wr":""}"><div class="sug-top"><div class="sug-l"><span class="sa ${ac}">${t.action}</span><div><div class="stk">${t.ticker}</div>${t.wash_risk?'<div class="sw">⚠️ Lockout — check before trading</div>':"" }</div></div><div class="sug-r"><div class="sp">${livePriceStr}</div><div class="ss">${t.shares||"—"} shares</div></div></div><div class="sr">${t.reason}</div></div>`;
+    const lockWarn = realWashRisk 
+      ? `<div class="sw">⚠️ WASH SALE LOCKED${lockOverride ? ' — safe after ' + fmt(lockOverride) : ' — check before trading'}</div>` 
+      : "";
+    trades += `<div class="sug-card${realWashRisk?" wr":""}"><div class="sug-top"><div class="sug-l"><span class="sa ${ac}">${t.action}</span><div><div class="stk">${t.ticker}</div>${lockWarn}</div></div><div class="sug-r"><div class="sp">${livePriceStr}</div><div class="ss">${t.shares||"—"} shares</div></div></div><div class="sr">${t.reason}</div></div>`;
   }
 
   let filterNote = "";
-  if (filteredCount > 0) {
-    filterNote = `<div style="background:rgba(217,119,6,.08);border:1px solid rgba(253,230,138,.25);border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:11px;color:var(--warn2)">⚠️ Filtered ${filteredCount} suggestion${filteredCount>1?'s':''} for stocks you don't hold. AI sometimes hallucinates — we block those.</div>`;
+  if (filteredCount > 0 || overriddenLockCount > 0) {
+    const parts = [];
+    if (filteredCount > 0) parts.push(`Filtered ${filteredCount} suggestion${filteredCount>1?'s':''} for stocks you don't hold`);
+    if (overriddenLockCount > 0) parts.push(`Flagged ${overriddenLockCount} wash-sale lockout${overriddenLockCount>1?'s':''} the AI missed`);
+    filterNote = `<div style="background:rgba(217,119,6,.08);border:1px solid rgba(253,230,138,.25);border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:11px;color:var(--warn2)">⚠️ ${parts.join('. ')}. Trust the app, not the AI's claims.</div>`;
   }
 
   el.innerHTML=`<div class="head-card"><div class="head-txt">${b.headline}</div><span class="mood ${md}">${ml}</span></div>${news?'<div class="sec-lbl">Your Holdings in the News</div>'+news:""}<div class="sec-lbl">${mdata.theme||"Today's Suggestions"}</div>${filterNote}${trades||'<div class="empty"><div>No suggestions for this mode.</div></div>'}`;
@@ -4309,6 +4358,25 @@ function renderInsightView(view, data) {
 }
 
 function renderOpportunities(wrap, d) {
+  // Helper: ALWAYS use live Finnhub price, never AI-provided
+  function livePrice(ticker) {
+    const live = S.prices && S.prices[ticker];
+    if (live?.current) return live.current;
+    const close = S.closingPrices && S.closingPrices[ticker];
+    if (close?.price) return Number(close.price);
+    return null;
+  }
+  function fmtLivePrice(ticker) {
+    const p = livePrice(ticker);
+    return p !== null ? "$" + p.toFixed(2) : "—";
+  }
+  function fmtTargetPrice(ticker, upsidePct) {
+    // Compute target from live price + AI upside %, not from AI price
+    const p = livePrice(ticker);
+    if (p !== null && upsidePct) return "$" + (p * (1 + Number(upsidePct)/100)).toFixed(2);
+    return "—";
+  }
+  
   let html = `<div style="background:linear-gradient(135deg,rgba(5,150,105,.15),rgba(26,79,214,.1));border:1px solid rgba(5,150,105,.3);border-radius:15px;padding:15px 16px;margin-bottom:12px">
     <div style="font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--green2);text-transform:uppercase;margin-bottom:8px">🎯 Opportunity Scanner</div>
     <div style="font-size:13px;line-height:1.6">${d.strategy_summary}</div>
@@ -4318,6 +4386,8 @@ function renderOpportunities(wrap, d) {
     html += `<div class="sec-lbl">💎 Top Opportunities</div>`;
     for (const o of d.top_opportunities) {
       const confColor = {high: "var(--green2)", medium: "var(--warn2)", speculative: "var(--red2)"}[o.confidence] || "var(--muted)";
+      const currentStr = fmtLivePrice(o.ticker);
+      const targetStr = fmtTargetPrice(o.ticker, o.upside_pct);
       html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:13px;padding:14px;margin-bottom:8px">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
           <div>
@@ -4330,8 +4400,8 @@ function renderOpportunities(wrap, d) {
           </div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;margin-bottom:10px;background:rgba(0,0,0,.2);border-radius:8px;padding:8px">
-          <div>Current: <b>$${o.current_price?.toFixed(2)}</b></div>
-          <div>Target: <b style="color:var(--green2)">$${o.target_price?.toFixed(2)}</b></div>
+          <div>Current: <b>${currentStr}</b></div>
+          <div>Target: <b style="color:var(--green2)">${targetStr}</b></div>
         </div>
         <div style="font-size:13px;line-height:1.5;color:rgba(255,255,255,.85);margin-bottom:8px">${o.why_now}</div>
         ${o.catalyst ? `<div style="font-size:11px;color:var(--gold2);margin-bottom:4px">⚡ ${o.catalyst}</div>` : ''}
