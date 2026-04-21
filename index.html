@@ -410,6 +410,7 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
         <div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.6">
           Trade history is stored privately on this device. Use Import to load history from a backup, or Export to save it.
         </div>
+        <button onclick="sw('log')" style="width:100%;padding:11px;background:rgba(100,116,139,.15);border:1px solid var(--border);color:#fff;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;margin-bottom:10px">📋 View Trade History (981 trades)</button>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
           <button onclick="exportTrades()" style="padding:11px;background:rgba(26,79,214,.2);border:1px solid rgba(26,79,214,.3);border-radius:10px;color:#93c5fd;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif">
             ↓ Export
@@ -451,7 +452,6 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
   <button class="ni2" onclick="sw('taxes')" id="nb-taxes"><span class="nico">💵</span><span class="nlbl">Taxes</span><div class="ndot"></div></button>
   <button class="ni2" onclick="sw('cal')" id="nb-cal"><span class="nico">📅</span><span class="nlbl">Calendar</span><div class="ndot"></div></button>
   <button class="ni2" onclick="sw('insights')" id="nb-insights"><span class="nico">💡</span><span class="nlbl">Insights</span><div class="ndot"></div></button>
-  <button class="ni2" onclick="sw('log')" id="nb-log"><span class="nico">📋</span><span class="nlbl">Trades</span><div class="ndot"></div></button>
 </nav>
 
 <script>
@@ -579,7 +579,7 @@ async function readSchwabEmails() {
           body: JSON.stringify({
             model: "claude-opus-4-7",
             max_tokens: 500,
-            system: "You extract trade data from Schwab emails. Return ONLY valid JSON with no markdown.",
+            system: "You extract trade data from Schwab emails. Return ONLY valid JSON with no markdown. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
             messages: [{role: "user", content: 
               `Extract trade(s) from this Schwab email. Subject: "${subject}". Date: ${msgDate}.
               
@@ -594,7 +594,7 @@ If no trade info visible, return {"trades":[]}. If multiple trades, include all.
         });
         const aiData = await aiRes.json();
         const text = aiData.content?.[0]?.text || "{}";
-        const parsed = JSON.parse(text.replace(/\`\`\`json|\`\`\`/g, "").trim());
+        const parsed = replacePriceTokens(JSON.parse(text.replace(/\`\`\`json|\`\`\`/g, "").trim()));
         
         if (parsed.trades?.length > 0) {
           for (const t of parsed.trades) {
@@ -951,6 +951,30 @@ const ld = (k,d) => { try{const v=localStorage.getItem("mt_"+k); return v?JSON.p
 // ── DATE HELPERS ───────────────────────────────────────────────────
 const tod = () => new Date().toISOString().split("T")[0];
 const fmt = d => new Date(d+"T12:00:00").toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
+
+// Convert Schwab's MM/DD/YYYY date format to ISO YYYY-MM-DD
+function schwabDateToISO(dateStr) {
+  if (!dateStr) return null;
+  // If already ISO, return as-is
+  if (/^\d{4}-\d{2}-\d{2}/.test(dateStr)) return dateStr.substring(0, 10);
+  // Parse MM/DD/YYYY
+  const m = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) {
+    const mm = m[1].padStart(2, "0");
+    const dd = m[2].padStart(2, "0");
+    return m[3] + "-" + mm + "-" + dd;
+  }
+  return dateStr; // fallback
+}
+
+// Compute days between MM/DD/YYYY dates, returning a positive integer
+function daysBetweenDates(d1, d2) {
+  const iso1 = schwabDateToISO(d1);
+  const iso2 = schwabDateToISO(d2);
+  if (!iso1 || !iso2) return 0;
+  return Math.abs(dbet(iso1, iso2));
+}
+
 const dbet = (a,b) => Math.abs(Math.round((new Date(a)-new Date(b))/86400000));
 const dadd = (d,n) => { const x=new Date(d+"T12:00:00"); x.setDate(x.getDate()+n); return x.toISOString().split("T")[0]; };
 const dunt = d => Math.ceil((new Date(d+"T12:00:00")-new Date())/86400000);
@@ -1053,18 +1077,23 @@ function computeWS(){
   if (S.schwabRealized?.lots?.length > 0) {
     for (const lot of S.schwabRealized.lots) {
       if (!lot.washSale) continue;
-      // Build a conflict entry matching original format
       const loss = -Math.abs(lot.disallowedLoss);
+      // Normalize Schwab's MM/DD/YYYY dates to ISO
+      const sellISO = schwabDateToISO(lot.closedDate);
+      const buyISO = schwabDateToISO(lot.openedDate);
+      const daysApart = daysBetweenDates(lot.openedDate, lot.closedDate);
+      const safeISO = sellISO ? dadd(sellISO, 31) : null;
+      const taxRate = ((S.cfg.taxBracket || 37) + 3.8) / 100;  // fed + NIIT combined
       S.conflicts.push({
         sid: "schwab-" + lot.ticker + "-" + lot.closedDate,
         bid: "schwab-" + lot.ticker + "-" + lot.openedDate,
         ticker: lot.ticker,
-        sellDate: lot.closedDate,
-        buyDate: lot.openedDate,
-        days: 0,
+        sellDate: sellISO,
+        buyDate: buyISO,
+        days: daysApart,
         loss: loss,
-        tax: Math.abs(loss) * 0.37,
-        safe: lot.closedDate
+        tax: Math.abs(loss) * taxRate,
+        safe: safeISO
       });
       // Don't add future lockouts — those only matter for upcoming sells, and Schwab data is historical
     }
@@ -1090,7 +1119,7 @@ function computeWS(){
       const days=dbet(sell.date,buy.date);
       if(days<=30){
         const exists=S.conflicts.find(c=>c.sid===sell.id&&c.bid===buy.id);
-        if(!exists) S.conflicts.push({sid:sell.id,bid:buy.id,ticker:sell.ticker,sellDate:sell.date,buyDate:buy.date,days,loss:sell.gain_loss,tax:Math.abs(sell.gain_loss)*.37,safe:dadd(sell.date,31)});
+        if(!exists) S.conflicts.push({sid:sell.id,bid:buy.id,ticker:sell.ticker,sellDate:sell.date,buyDate:buy.date,days,loss:sell.gain_loss,tax:Math.abs(sell.gain_loss)*(((S.cfg.taxBracket||37)+3.8)/100),safe:dadd(sell.date,31)});
       }
     }
   }
@@ -1103,7 +1132,7 @@ function checkConflict(ticker,action){
   const today=tod(); const w=[];
   if(action==="BUY"){
     const recent=S.trades.filter(t=>t.ticker===ticker&&t.action==="SELL"&&t.gain_loss<0&&dbet(today,t.date)<=30);
-    for(const s of recent) w.push({msg:`You sold ${ticker} at a loss on ${fmt(s.date)} — ${dbet(today,s.date)} days ago. Buying today creates a wash sale.`,tax:Math.abs(s.gain_loss)*.37,safe:dadd(s.date,31)});
+    for(const s of recent) w.push({msg:`You sold ${ticker} at a loss on ${fmt(s.date)} — ${dbet(today,s.date)} days ago. Buying today creates a wash sale.`,tax:Math.abs(s.gain_loss)*(((S.cfg.taxBracket||37)+3.8)/100),safe:dadd(s.date,31)});
   }
   if(action==="SELL"){
     const recent=S.trades.filter(t=>t.ticker===ticker&&t.action==="BUY"&&dbet(today,t.date)<=30);
@@ -1199,7 +1228,11 @@ async function genBrief(){
 
   const now = new Date().toLocaleString("en-US", {timeZone: "America/New_York", weekday:"long", month:"long", day:"numeric", hour:"numeric", minute:"2-digit"});
 
-  // Build sector context so AI knows which competitors affect his holdings
+  // Build unified context — single source of truth (Schwab + positions + lockouts + tax profile)
+  const unifiedCtx = buildUnifiedContext();
+  const unifiedCtxText = formatContextForPrompt(unifiedCtx, {maxPositions: 15});
+
+  // Build sector context so AI knows which competitors affect your holdings
   const sectorContext = [];
   for (const t of Object.keys(pos).filter(t => pos[t].shares > 0)) {
     const info = SECTOR_MAP[t];
@@ -1209,7 +1242,7 @@ async function genBrief(){
   }
   const sectorStr = sectorContext.join("\n") || "no sector data";
   
-  const prompt = `Current time in New York: ${now}
+  const prompt = unifiedCtxText + `\n\nCurrent time in New York: ${now}
 Session: ${ctx.session}
 ${ctx.planFor}
 
@@ -1245,22 +1278,27 @@ Return ONLY valid JSON, no markdown:
   "market_mood": "bullish OR bearish OR mixed",
   "key_events": "One sentence about biggest market event right now",
   "news": [
-    {"ticker": "NVDA", "summary": "CURRENT news — 1-2 short plain sentences", "impact": "good OR bad OR neutral", "price": 201.50, "is_holding": true, "affects": []},
-    {"ticker": "TSM", "summary": "TSM earnings miss — chip sector under pressure", "impact": "bad", "price": 180.00, "is_holding": false, "affects": ["NVDA", "AMD", "AVGO"]}
+    {"ticker": "NVDA", "summary": "CURRENT news — 1-2 short plain sentences. Use [CURRENT_PRICE:NVDA] if you need to mention the price", "impact": "good OR bad OR neutral", "price_placeholder": "[CURRENT_PRICE:NVDA]", "is_holding": true, "affects": []},
+    {"ticker": "TSM", "summary": "TSM earnings miss — chip sector under pressure", "impact": "bad", "price_placeholder": "[CURRENT_PRICE:TSM]", "is_holding": false, "affects": ["NVDA", "AMD", "AVGO"]}
   ],
-  "conservative": {"theme": "...", "trades": [{"action": "BUY OR SELL OR HOLD", "ticker": "AMD", "shares": 25, "price": 124.50, "reason": "...", "wash_risk": false}]},
+  "conservative": {"theme": "...", "trades": [{"action": "BUY OR SELL OR HOLD", "ticker": "AMD", "shares": 25, "price_placeholder": "[CURRENT_PRICE:AMD]", "reason": "...", "wash_risk": false}]},
   "moderate": {"theme": "...", "trades": [...]},
   "active": {"theme": "...", "trades": [...]}
 }
 
 Rules:
-- news should mix: his direct holdings (is_holding: true) AND sector competitors that affect his stocks (is_holding: false, affects: [list of his holdings])
-- For sector news, "affects" array must list which of HIS tickers are impacted
+- CRITICAL: Use CONTEXT above as single source of truth. Do NOT contradict YTD realized numbers, positions, or lockouts.
+- CRITICAL: Do NOT invent stock prices. Use [CURRENT_PRICE:TICKER] placeholder for any current price. The app injects real prices.
+- CRITICAL: Do NOT reference holidays, events, or days not explicitly in the Today date above. No "Good Friday", "Memorial Day", etc. unless Today matches.
+- CRITICAL: If YTD realized for a ticker is NEGATIVE, do not claim you "won big" or "made money" on it. Acknowledge the loss.
+- CRITICAL: NEVER recommend selling at a loss on a wash-sale-locked ticker (see LOCKOUTS in context).
+- news should mix: your direct holdings (is_holding: true) AND sector competitors that affect your stocks (is_holding: false, affects: [list of your holdings])
+- For sector news, "affects" array must list which of YOUR tickers are impacted
 - conservative: 2 suggestions max · moderate: 3-4 · active: 4-5
 - NEVER suggest selling more than 25% of held position
 - Mark wash_risk true if ticker is in lockouts
-- SHORT simple English — English is your reader's second language
-- Always "you/your" — never "him/he/his"`;
+- SHORT simple English — your reader's English is second language
+- Always "you/your" — never "him/he/his/Morris"`;
 
   try{
     const res=await fetch("https://api.anthropic.com/v1/messages",{
@@ -1269,7 +1307,7 @@ Rules:
       body:JSON.stringify({
         model:"claude-opus-4-7",
         max_tokens:4000,
-        system: "You are a real-time market analyst. Always use the most current market information available to you. Factor in time of day, session, and recent news. Be specific with prices.",
+        system: "You are a real-time market analyst. Always use the most current market information available to you. Factor in time of day, session, and recent news. Be specific with prices. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
         messages:[{role:"user",content:prompt}]
       })
     });
@@ -1281,7 +1319,7 @@ Rules:
     let cleaned = text.replace(/```json|```/g,"").trim();
     // Try to recover from truncated JSON
     try {
-      S.brief = JSON.parse(cleaned);
+      S.brief = replacePriceTokens(JSON.parse(cleaned));
     } catch(parseErr) {
       // Attempt to fix truncated JSON by closing brackets
       let fixed = cleaned;
@@ -1301,7 +1339,7 @@ Rules:
         while (openBraces > 0) { fixed += '}'; openBraces--; }
       }
       try {
-        S.brief = JSON.parse(fixed);
+        S.brief = replacePriceTokens(JSON.parse(fixed));
         console.log("Recovered truncated brief JSON");
       } catch(e2) {
         throw new Error(`Brief response malformed: ${parseErr.message}. AI response was ${text.length} chars. Try Retry.`);
@@ -1344,7 +1382,7 @@ Body: ${body.substring(0, 3000)}`;
     });
     const data = await res.json();
     const text = data.content?.[0]?.text || '';
-    const positions = JSON.parse(text.replace(/```json|```/g, '').trim());
+    const positions = replacePriceTokens(JSON.parse(text.replace(/```json|```/g, '').trim()));
     if (!Array.isArray(positions) || positions.length === 0) return null;
 
     // Update closing prices in state
@@ -1449,7 +1487,7 @@ async function testAPIKey() {
       body: JSON.stringify({
         model: "claude-opus-4-7",
         max_tokens: 50,
-        system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader.",
+        system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
         messages: [{role: "user", content: "Say hi in 3 words"}]
       })
     });
@@ -1756,7 +1794,9 @@ async function runPatternAnalysis() {
   const washLosses = washSales.reduce((sum, w) => sum + Math.abs(w.loss || 0), 0);
   const washTax = washSales.reduce((sum, w) => sum + (w.tax || 0), 0);
   
-  const prompt = `Analyze these 981 trades and find patterns that make money vs lose money. Address the reader directly as "you" — never "him", "he", or "the trader". This is a personal trading tool.
+  const unifiedCtx = buildUnifiedContext();
+  const unifiedCtxText = formatContextForPrompt(unifiedCtx, {maxPositions: 15});
+  const prompt = unifiedCtxText + `\n\nAnalyze these 981 trades and find patterns that make money vs lose money. Address the reader directly as "you" — never "him", "he", or "the trader". This is a personal trading tool.
 
 ⚠️ CRITICAL CONTEXT — WASH SALE PROBLEM:
 You have already triggered ${washSales.length} wash sales in the last 6 months.
@@ -1827,7 +1867,7 @@ RULES:
       body: JSON.stringify({
         model: "claude-opus-4-7",
         max_tokens: 3000,
-        system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader.",
+        system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
         messages: [{role: "user", content: prompt}]
       })
     });
@@ -1836,7 +1876,7 @@ RULES:
     const text = data.content?.[0]?.text || '';
     let cleaned = text.replace(/```json|```/g, '').trim();
     try {
-      S.patterns = JSON.parse(cleaned);
+      S.patterns = replacePriceTokens(JSON.parse(cleaned));
     } catch(parseErr) {
       const lastBrace = cleaned.lastIndexOf('}');
       if (lastBrace > 0) {
@@ -1850,7 +1890,7 @@ RULES:
         }
         while (openBrackets > 0) { fixed += ']'; openBrackets--; }
         while (openBraces > 0) { fixed += '}'; openBraces--; }
-        S.patterns = JSON.parse(fixed);
+        S.patterns = replacePriceTokens(JSON.parse(fixed));
       } else {
         throw parseErr;
       }
@@ -2000,6 +2040,165 @@ function renderTaxes() {
     </div>`;
     return;
   }
+
+
+  
+  // Apply email updates (estimates since last CSV import)
+  let estRealizedST = r.ytd_short_term;
+  let estRealizedLT = r.ytd_long_term;
+  let estDisallowed = r.ytd_disallowed;
+  let emailUpdateCount = S.schwabEmailUpdates?.length || 0;
+  
+  // Calculate tax liability
+  const baseTax = computeTaxLiability(r.ytd_short_term, r.ytd_long_term);
+  const estTax = computeTaxLiability(estRealizedST, estRealizedLT);
+  
+  // Format dates
+  const importDate = new Date(r.importedAt).toLocaleDateString();
+  period.innerHTML = `Period: <b style="color:#fff">${r.fromDate}</b> to <b style="color:#fff">${r.throughDate}</b> · Imported ${importDate}${emailUpdateCount > 0 ? ` · <span style="color:var(--warn2)">${emailUpdateCount} email updates since</span>` : ""}`;
+  
+  let html = "";
+  
+  // ═══ TOP CARDS ═══
+  html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">`;
+  
+  // Card 1: Realized Gain
+  html += `<div style="background:linear-gradient(135deg,rgba(5,150,105,.15),rgba(8,145,178,.08));border:1px solid rgba(167,243,208,.25);border-radius:13px;padding:14px">
+    <div style="font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--green2);text-transform:uppercase;margin-bottom:6px">YTD Realized Gain</div>
+    <div style="font-family:'Playfair Display',serif;font-size:26px;font-weight:800;color:${r.ytd_realized >= 0 ? 'var(--green2)' : 'var(--red2)'}">${fmtMoneyDetail(r.ytd_realized)}</div>
+    <div style="font-size:11px;color:var(--muted);margin-top:4px">Short-term: ${fmtMoneyDetail(r.ytd_short_term)}<br>Long-term: ${fmtMoneyDetail(r.ytd_long_term)}</div>
+  </div>`;
+  
+  // Card 2: Wash Sale Phantom Losses
+  html += `<div style="background:linear-gradient(135deg,rgba(220,38,38,.15),rgba(217,119,6,.08));border:1px solid rgba(252,165,165,.25);border-radius:13px;padding:14px">
+    <div style="font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--red2);text-transform:uppercase;margin-bottom:6px">Wash Sale Phantom $</div>
+    <div style="font-family:'Playfair Display',serif;font-size:26px;font-weight:800;color:var(--red2)">${fmtMoneyDetail(r.ytd_disallowed)}</div>
+    <div style="font-size:11px;color:var(--muted);margin-top:4px">${r.wash_sale_lots} lots disallowed<br>Phantom tax cost: ${fmtMoneyDetail(r.ytd_disallowed * ((S.cfg.taxBracket || 37) + 3.8) / 100)}</div>
+  </div>`;
+  
+  html += `</div>`;
+  
+  // ═══ TOTAL TAX BILL CARD (hero) ═══
+  html += `<div style="background:linear-gradient(135deg,rgba(212,160,23,.2),rgba(217,119,6,.1));border:1.5px solid rgba(253,230,138,.35);border-radius:15px;padding:16px;margin-bottom:12px">
+    <div style="font-size:11px;font-weight:700;letter-spacing:.08em;color:var(--gold2);text-transform:uppercase;margin-bottom:8px">📊 Estimated 2026 Tax Bill (Trading)</div>
+    <div style="font-family:'Playfair Display',serif;font-size:34px;font-weight:800;color:var(--gold2);line-height:1">${fmtMoneyDetail(baseTax.total)}</div>
+    <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08)">
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span style="color:rgba(255,255,255,.85)">Federal (ST @ ${(baseTax.fedRateST*100).toFixed(0)}%):</span><span style="color:#fff;font-weight:700">${fmtMoneyDetail(baseTax.fedTaxST)}</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span style="color:rgba(255,255,255,.85)">Federal (LT @ ${(baseTax.fedRateLT*100).toFixed(0)}%):</span><span style="color:#fff;font-weight:700">${fmtMoneyDetail(baseTax.fedTaxLT)}</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span style="color:rgba(255,255,255,.85)">NIIT (3.8% surtax):</span><span style="color:#fff;font-weight:700">${fmtMoneyDetail(baseTax.niit)}</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:rgba(255,255,255,.85)">State (FL - no tax):</span><span style="color:var(--green2);font-weight:700">$0</span></div>
+    </div>
+    <div style="font-size:10px;color:var(--muted);margin-top:8px;font-style:italic">Assumes AGI > $250K (NIIT threshold) and 37% federal bracket. Tax law assumptions - consult your CPA for filing.</div>
+  </div>`;
+  
+  // ═══ THE KEY INSIGHT BANNER ═══
+  if (r.ytd_disallowed > 1000) {
+    const phantomTax = r.ytd_disallowed * (((S.cfg.taxBracket || 37) + 3.8) / 100);
+    html += `<div style="background:rgba(220,38,38,.1);border-left:4px solid var(--red2);border-radius:10px;padding:12px 14px;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:700;color:var(--red2);margin-bottom:4px">💡 The Wash Sale Problem Explained</div>
+      <div style="font-size:12px;color:rgba(255,255,255,.9);line-height:1.5">You have <b>${fmtMoneyDetail(r.ytd_disallowed)}</b> of losses that you thought would reduce your tax bill — but they won't. That's because you rebought the same stocks within 30 days, which makes those losses "disallowed" for this tax year. At your ${(S.cfg.taxBracket || 37)}% bracket plus 3.8% NIIT, this costs you an extra <b style="color:var(--gold2)">${fmtMoneyDetail(phantomTax)} in taxes</b>. The losses aren't gone forever (they get added to your cost basis for next time), but you don't get the tax benefit NOW.</div>
+    </div>`;
+  }
+  
+  // ═══ PLAIN-ENGLISH EXPLAINER ═══
+  html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:11px;padding:13px;margin-bottom:10px">
+    <div style="font-size:12px;font-weight:700;color:var(--gold2);margin-bottom:8px">📖 Reading This Table</div>
+    <div style="font-size:12px;color:rgba(255,255,255,.85);line-height:1.7">
+      <b>LOTS</b> = how many times you closed out shares of that stock (each BUY→SELL cycle is one lot).<br>
+      <b>REALIZED</b> = your actual profit or loss on that ticker this year. Green = you made money, red = you lost money.<br>
+      <b>WASH SALE $</b> = losses the IRS will NOT let you deduct this year because you rebought within 30 days. These losses aren't permanently lost — they get added to your future cost basis, but you don't get the tax benefit right now.
+    </div>
+  </div>`;
+
+  // ═══ PER-TICKER BREAKDOWN ═══
+  html += `<div class="sec-lbl">Per-Ticker Tax Impact</div>`;
+  const tickers = Object.entries(r.by_ticker)
+    .filter(([t, d]) => Math.abs(d.realized) > 100 || Math.abs(d.disallowed) > 100)
+    .sort((a, b) => Math.abs(b[1].realized) + Math.abs(b[1].disallowed) - (Math.abs(a[1].realized) + Math.abs(a[1].disallowed)));
+  
+  html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:11px;overflow:hidden;margin-bottom:12px">
+    <div style="display:grid;grid-template-columns:80px 50px 1fr 1fr;gap:4px;padding:10px 12px;background:rgba(255,255,255,.04);font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">
+      <div>Ticker</div><div>Lots</div><div style="text-align:right">Realized</div><div style="text-align:right">Wash Sale $</div>
+    </div>`;
+  
+  for (const [ticker, d] of tickers.slice(0, 25)) {
+    const rowBg = d.realized < -5000 ? 'rgba(220,38,38,.06)' : (d.realized > 5000 ? 'rgba(5,150,105,.06)' : 'transparent');
+    html += `<div style="display:grid;grid-template-columns:80px 50px 1fr 1fr;gap:4px;padding:9px 12px;border-top:1px solid rgba(255,255,255,.04);font-size:13px;background:${rowBg}">
+      <div style="font-weight:800;color:var(--gold2);font-family:'Playfair Display',serif">${ticker}</div>
+      <div style="color:var(--muted);font-size:11px">${d.lots}</div>
+      <div style="text-align:right;color:${d.realized >= 0 ? 'var(--green2)' : 'var(--red2)'};font-weight:700">${fmtMoneyDetail(d.realized)}</div>
+      <div style="text-align:right;color:${d.disallowed > 1000 ? 'var(--warn2)' : 'var(--muted)'};font-weight:${d.disallowed > 1000 ? '700' : '400'}">${d.disallowed > 0 ? fmtMoneyDetail(d.disallowed) : '—'}</div>
+    </div>`;
+  }
+  html += `</div>`;
+  
+  // ═══ TAX LOSS HARVEST OPPORTUNITIES ═══
+  // Scan CURRENT positions for unrealized losses > $5K
+  const harvestOpps = [];
+  if (S.schwabPositions?.positions?.length > 0) {
+    for (const p of S.schwabPositions.positions) {
+      const live = S.prices?.[p.ticker];
+      if (!live) continue;
+      const currentVal = p.shares * live.current;
+      const loss = currentVal - p.costBasisTotal;
+      const lossPct = p.costBasisTotal > 0 ? (loss / p.costBasisTotal) * 100 : 0;
+      if (loss < -5000) {
+        // Check wash sale safety
+        const hasRecentBuy = S.trades.some(t => 
+          t.ticker === p.ticker && t.action === "BUY" && 
+          dbet(t.date, tod()) <= 30
+        );
+        const lockedUntil = S.lockouts?.[p.ticker];
+        const safeToday = !hasRecentBuy && (!lockedUntil || lockedUntil < tod());
+        const taxSaved = Math.abs(loss) * (((S.cfg.taxBracket || 37) + 3.8) / 100);
+        harvestOpps.push({
+          ticker: p.ticker, loss, lossPct, 
+          hasRecentBuy, lockedUntil, safeToday,
+          taxSaved, shares: p.shares, currentPrice: live.current, costBasis: p.costBasisPerShare
+        });
+      }
+    }
+  }
+  
+  if (harvestOpps.length > 0) {
+    harvestOpps.sort((a,b) => a.loss - b.loss);
+    html += `<div class="sec-lbl">🎯 Tax-Loss Harvest Opportunities</div>`;
+    html += `<div style="font-size:12px;color:var(--muted);margin-bottom:9px;line-height:1.5">Selling these at a loss could offset gains and lower your tax bill — but only if you don't rebuy within 30 days.</div>`;
+    
+    for (const opp of harvestOpps.slice(0, 6)) {
+      const safetyBanner = opp.safeToday
+        ? `<div style="background:rgba(5,150,105,.15);padding:7px 10px;border-radius:7px;font-size:11px;color:var(--green2);margin-top:8px"><b>✅ Safe to harvest today.</b> Would save est. ${fmtMoneyDetail(opp.taxSaved)} in tax. Don't rebuy for 31 days.</div>`
+        : `<div style="background:rgba(220,38,38,.15);padding:7px 10px;border-radius:7px;font-size:11px;color:var(--red2);margin-top:8px"><b>⚠️ NOT safe today.</b> You bought within 30 days. Selling now would wash sale again.</div>`;
+      
+      html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:13px;padding:13px;margin-bottom:7px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+          <div>
+            <div style="font-family:'Playfair Display',serif;font-size:20px;font-weight:800;color:var(--gold2)">${opp.ticker}</div>
+            <div style="font-size:11px;color:var(--muted)">${opp.shares.toLocaleString()} shares @ $${opp.costBasis.toFixed(2)} avg cost</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:15px;font-weight:800;color:var(--red2)">${fmtMoneyDetail(opp.loss)}</div>
+            <div style="font-size:11px;color:var(--muted)">${opp.lossPct.toFixed(1)}% down</div>
+          </div>
+        </div>
+        <div style="font-size:12px;color:rgba(255,255,255,.85)">Current: $${opp.currentPrice.toFixed(2)} · Position value: $${(opp.shares * opp.currentPrice).toFixed(0).toLocaleString()}</div>
+        ${safetyBanner}
+      </div>`;
+    }
+  }
+  
+  // ═══ UPDATE HISTORY ═══
+  html += `<div class="sec-lbl" style="margin-top:14px">Data Freshness</div>
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:11px;padding:12px;font-size:12px;color:rgba(255,255,255,.85);line-height:1.7">
+    <div>📥 Last CSV import: <b style="color:#fff">${importDate}</b></div>
+    <div>📧 Email updates since: <b style="color:#fff">${emailUpdateCount}</b> ${emailUpdateCount === 0 ? '<span style="color:var(--muted)">(waiting for Schwab emails to arrive)</span>' : ''}</div>
+    <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.08);color:var(--muted);font-size:11px">Re-import the Schwab CSV weekly to keep numbers authoritative. Between imports, Schwab trade confirmation emails update YTD estimates automatically.</div>
+  </div>`;
+  
+  wrap.innerHTML = html;
+}
+
+
 
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2305,7 +2504,7 @@ async function runAIAlternatives(ticker) {
       body: JSON.stringify({
         model: "claude-opus-4-7",
         max_tokens: 1000,
-        system: "You are a trading advisor. Address the user directly as 'you'. Never use 'him', 'his', 'Morris', or third-person references.",
+        system: "You are a trading advisor. Address the user directly as 'you'. Never use 'him', 'his', 'Morris', or third-person references. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
         messages: [{role: "user", content: 
           `You want to sell ${ticker} to harvest a loss but need to stay in the same sector to not miss a rebound. Suggest 3 alternative stocks or ETFs to buy IMMEDIATELY today instead of ${ticker}.
 
@@ -2324,7 +2523,7 @@ Use 'you/your' language throughout. Give 3 alternatives with CURRENT prices.`
     });
     const data = await res.json();
     const text = data.content?.[0]?.text || "{}";
-    const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+    const parsed = replacePriceTokens(JSON.parse(text.replace(/```json|```/g, "").trim()));
     
     if (parsed.alternatives?.length > 0) {
       let html = '<div style="margin-top:8px;padding:10px;background:rgba(26,79,214,.08);border-radius:8px">';
@@ -2347,153 +2546,6 @@ Use 'you/your' language throughout. Give 3 alternatives with CURRENT prices.`
   } catch(e) {
     resultDiv.innerHTML = `<div style="padding:8px;background:rgba(220,38,38,.1);border-radius:6px;color:var(--red2);font-size:11px">AI error: ${e.message}</div>`;
   }
-}
-
-
-  
-  // Apply email updates (estimates since last CSV import)
-  let estRealizedST = r.ytd_short_term;
-  let estRealizedLT = r.ytd_long_term;
-  let estDisallowed = r.ytd_disallowed;
-  let emailUpdateCount = S.schwabEmailUpdates?.length || 0;
-  
-  // Calculate tax liability
-  const baseTax = computeTaxLiability(r.ytd_short_term, r.ytd_long_term);
-  const estTax = computeTaxLiability(estRealizedST, estRealizedLT);
-  
-  // Format dates
-  const importDate = new Date(r.importedAt).toLocaleDateString();
-  period.innerHTML = `Period: <b style="color:#fff">${r.fromDate}</b> to <b style="color:#fff">${r.throughDate}</b> · Imported ${importDate}${emailUpdateCount > 0 ? ` · <span style="color:var(--warn2)">${emailUpdateCount} email updates since</span>` : ""}`;
-  
-  let html = "";
-  
-  // ═══ TOP CARDS ═══
-  html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">`;
-  
-  // Card 1: Realized Gain
-  html += `<div style="background:linear-gradient(135deg,rgba(5,150,105,.15),rgba(8,145,178,.08));border:1px solid rgba(167,243,208,.25);border-radius:13px;padding:14px">
-    <div style="font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--green2);text-transform:uppercase;margin-bottom:6px">YTD Realized Gain</div>
-    <div style="font-family:'Playfair Display',serif;font-size:26px;font-weight:800;color:${r.ytd_realized >= 0 ? 'var(--green2)' : 'var(--red2)'}">${fmtMoneyDetail(r.ytd_realized)}</div>
-    <div style="font-size:11px;color:var(--muted);margin-top:4px">Short-term: ${fmtMoneyDetail(r.ytd_short_term)}<br>Long-term: ${fmtMoneyDetail(r.ytd_long_term)}</div>
-  </div>`;
-  
-  // Card 2: Wash Sale Phantom Losses
-  html += `<div style="background:linear-gradient(135deg,rgba(220,38,38,.15),rgba(217,119,6,.08));border:1px solid rgba(252,165,165,.25);border-radius:13px;padding:14px">
-    <div style="font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--red2);text-transform:uppercase;margin-bottom:6px">Wash Sale Phantom $</div>
-    <div style="font-family:'Playfair Display',serif;font-size:26px;font-weight:800;color:var(--red2)">${fmtMoneyDetail(r.ytd_disallowed)}</div>
-    <div style="font-size:11px;color:var(--muted);margin-top:4px">${r.wash_sale_lots} lots disallowed<br>Phantom tax cost: ${fmtMoneyDetail(r.ytd_disallowed * 0.37)}</div>
-  </div>`;
-  
-  html += `</div>`;
-  
-  // ═══ TOTAL TAX BILL CARD (hero) ═══
-  html += `<div style="background:linear-gradient(135deg,rgba(212,160,23,.2),rgba(217,119,6,.1));border:1.5px solid rgba(253,230,138,.35);border-radius:15px;padding:16px;margin-bottom:12px">
-    <div style="font-size:11px;font-weight:700;letter-spacing:.08em;color:var(--gold2);text-transform:uppercase;margin-bottom:8px">📊 Estimated 2026 Tax Bill (Trading)</div>
-    <div style="font-family:'Playfair Display',serif;font-size:34px;font-weight:800;color:var(--gold2);line-height:1">${fmtMoneyDetail(baseTax.total)}</div>
-    <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08)">
-      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span style="color:rgba(255,255,255,.85)">Federal (ST @ ${(baseTax.fedRateST*100).toFixed(0)}%):</span><span style="color:#fff;font-weight:700">${fmtMoneyDetail(baseTax.fedTaxST)}</span></div>
-      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span style="color:rgba(255,255,255,.85)">Federal (LT @ ${(baseTax.fedRateLT*100).toFixed(0)}%):</span><span style="color:#fff;font-weight:700">${fmtMoneyDetail(baseTax.fedTaxLT)}</span></div>
-      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span style="color:rgba(255,255,255,.85)">NIIT (3.8% surtax):</span><span style="color:#fff;font-weight:700">${fmtMoneyDetail(baseTax.niit)}</span></div>
-      <div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:rgba(255,255,255,.85)">State (FL - no tax):</span><span style="color:var(--green2);font-weight:700">$0</span></div>
-    </div>
-    <div style="font-size:10px;color:var(--muted);margin-top:8px;font-style:italic">Assumes AGI > $250K (NIIT threshold) and 37% federal bracket. Tax law assumptions - consult your CPA for filing.</div>
-  </div>`;
-  
-  // ═══ THE KEY INSIGHT BANNER ═══
-  if (r.ytd_disallowed > 1000) {
-    const phantomTax = r.ytd_disallowed * 0.37;
-    html += `<div style="background:rgba(220,38,38,.1);border-left:4px solid var(--red2);border-radius:10px;padding:12px 14px;margin-bottom:12px">
-      <div style="font-size:13px;font-weight:700;color:var(--red2);margin-bottom:4px">💡 The Wash Sale Problem Explained</div>
-      <div style="font-size:12px;color:rgba(255,255,255,.9);line-height:1.5">You have <b>${fmtMoneyDetail(r.ytd_disallowed)}</b> of losses that you thought would reduce your tax bill — but they won't. That's because you rebought the same stocks within 30 days, which makes those losses "disallowed" for this tax year. At your 37% bracket, this costs you an extra <b style="color:var(--gold2)">${fmtMoneyDetail(phantomTax)} in taxes</b>. The losses aren't gone forever (they get added to your cost basis for next time), but you don't get the tax benefit NOW.</div>
-    </div>`;
-  }
-  
-  // ═══ PER-TICKER BREAKDOWN ═══
-  html += `<div class="sec-lbl">Per-Ticker Tax Impact</div>`;
-  const tickers = Object.entries(r.by_ticker)
-    .filter(([t, d]) => Math.abs(d.realized) > 100 || Math.abs(d.disallowed) > 100)
-    .sort((a, b) => Math.abs(b[1].realized) + Math.abs(b[1].disallowed) - (Math.abs(a[1].realized) + Math.abs(a[1].disallowed)));
-  
-  html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:11px;overflow:hidden;margin-bottom:12px">
-    <div style="display:grid;grid-template-columns:80px 50px 1fr 1fr;gap:4px;padding:10px 12px;background:rgba(255,255,255,.04);font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">
-      <div>Ticker</div><div>Lots</div><div style="text-align:right">Realized</div><div style="text-align:right">Wash Sale $</div>
-    </div>`;
-  
-  for (const [ticker, d] of tickers.slice(0, 25)) {
-    const rowBg = d.realized < -5000 ? 'rgba(220,38,38,.06)' : (d.realized > 5000 ? 'rgba(5,150,105,.06)' : 'transparent');
-    html += `<div style="display:grid;grid-template-columns:80px 50px 1fr 1fr;gap:4px;padding:9px 12px;border-top:1px solid rgba(255,255,255,.04);font-size:13px;background:${rowBg}">
-      <div style="font-weight:800;color:var(--gold2);font-family:'Playfair Display',serif">${ticker}</div>
-      <div style="color:var(--muted);font-size:11px">${d.lots}</div>
-      <div style="text-align:right;color:${d.realized >= 0 ? 'var(--green2)' : 'var(--red2)'};font-weight:700">${fmtMoneyDetail(d.realized)}</div>
-      <div style="text-align:right;color:${d.disallowed > 1000 ? 'var(--warn2)' : 'var(--muted)'};font-weight:${d.disallowed > 1000 ? '700' : '400'}">${d.disallowed > 0 ? fmtMoneyDetail(d.disallowed) : '—'}</div>
-    </div>`;
-  }
-  html += `</div>`;
-  
-  // ═══ TAX LOSS HARVEST OPPORTUNITIES ═══
-  // Scan CURRENT positions for unrealized losses > $5K
-  const harvestOpps = [];
-  if (S.schwabPositions?.positions?.length > 0) {
-    for (const p of S.schwabPositions.positions) {
-      const live = S.prices?.[p.ticker];
-      if (!live) continue;
-      const currentVal = p.shares * live.current;
-      const loss = currentVal - p.costBasisTotal;
-      const lossPct = p.costBasisTotal > 0 ? (loss / p.costBasisTotal) * 100 : 0;
-      if (loss < -5000) {
-        // Check wash sale safety
-        const hasRecentBuy = S.trades.some(t => 
-          t.ticker === p.ticker && t.action === "BUY" && 
-          dbet(t.date, tod()) <= 30
-        );
-        const lockedUntil = S.lockouts?.[p.ticker];
-        const safeToday = !hasRecentBuy && (!lockedUntil || lockedUntil < tod());
-        const taxSaved = Math.abs(loss) * 0.37;
-        harvestOpps.push({
-          ticker: p.ticker, loss, lossPct, 
-          hasRecentBuy, lockedUntil, safeToday,
-          taxSaved, shares: p.shares, currentPrice: live.current, costBasis: p.costBasisPerShare
-        });
-      }
-    }
-  }
-  
-  if (harvestOpps.length > 0) {
-    harvestOpps.sort((a,b) => a.loss - b.loss);
-    html += `<div class="sec-lbl">🎯 Tax-Loss Harvest Opportunities</div>`;
-    html += `<div style="font-size:12px;color:var(--muted);margin-bottom:9px;line-height:1.5">Selling these at a loss could offset gains and lower your tax bill — but only if you don't rebuy within 30 days.</div>`;
-    
-    for (const opp of harvestOpps.slice(0, 6)) {
-      const safetyBanner = opp.safeToday
-        ? `<div style="background:rgba(5,150,105,.15);padding:7px 10px;border-radius:7px;font-size:11px;color:var(--green2);margin-top:8px"><b>✅ Safe to harvest today.</b> Would save est. ${fmtMoneyDetail(opp.taxSaved)} in tax. Don't rebuy for 31 days.</div>`
-        : `<div style="background:rgba(220,38,38,.15);padding:7px 10px;border-radius:7px;font-size:11px;color:var(--red2);margin-top:8px"><b>⚠️ NOT safe today.</b> You bought within 30 days. Selling now would wash sale again.</div>`;
-      
-      html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:13px;padding:13px;margin-bottom:7px">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
-          <div>
-            <div style="font-family:'Playfair Display',serif;font-size:20px;font-weight:800;color:var(--gold2)">${opp.ticker}</div>
-            <div style="font-size:11px;color:var(--muted)">${opp.shares.toLocaleString()} shares @ $${opp.costBasis.toFixed(2)} avg cost</div>
-          </div>
-          <div style="text-align:right">
-            <div style="font-size:15px;font-weight:800;color:var(--red2)">${fmtMoneyDetail(opp.loss)}</div>
-            <div style="font-size:11px;color:var(--muted)">${opp.lossPct.toFixed(1)}% down</div>
-          </div>
-        </div>
-        <div style="font-size:12px;color:rgba(255,255,255,.85)">Current: $${opp.currentPrice.toFixed(2)} · Position value: $${(opp.shares * opp.currentPrice).toFixed(0).toLocaleString()}</div>
-        ${safetyBanner}
-      </div>`;
-    }
-  }
-  
-  // ═══ UPDATE HISTORY ═══
-  html += `<div class="sec-lbl" style="margin-top:14px">Data Freshness</div>
-  <div style="background:var(--card);border:1px solid var(--border);border-radius:11px;padding:12px;font-size:12px;color:rgba(255,255,255,.85);line-height:1.7">
-    <div>📥 Last CSV import: <b style="color:#fff">${importDate}</b></div>
-    <div>📧 Email updates since: <b style="color:#fff">${emailUpdateCount}</b> ${emailUpdateCount === 0 ? '<span style="color:var(--muted)">(waiting for Schwab emails to arrive)</span>' : ''}</div>
-    <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.08);color:var(--muted);font-size:11px">Re-import the Schwab CSV weekly to keep numbers authoritative. Between imports, Schwab trade confirmation emails update YTD estimates automatically.</div>
-  </div>`;
-  
-  wrap.innerHTML = html;
 }
 
 
@@ -2575,12 +2627,32 @@ function renderInsights() {
 }
 
 function renderStats(){
-  const today2=tod();
-  const c=S.conflicts.filter(c=>{const sf=c.safe>=today2; const rs=dbet(today2,c.sellDate)<=60; return sf||rs;}).length;
-  const l=Object.values(S.lockouts).filter(d=>d>=tod()).length;
-  const ce=document.getElementById("st-c"),lv=document.getElementById("sv-l"),tv=document.getElementById("sv-t");
-  ce.className="stat"+(c>0?" danger":""); document.getElementById("sv-c").textContent=c; document.getElementById("sv-c").className="sv"+(c>0?" danger":"");
-  lv.textContent=l; tv.textContent=S.trades.length;
+  const today2 = tod();
+  // Match renderDash logic exactly: relevant conflicts, deduped by ticker+sellDate, minus dismissed
+  const relevantConflicts = S.conflicts.filter(c => {
+    const safeStillFuture = c.safe >= today2;
+    const recentSell = c.sellDate ? dbet(today2, c.sellDate) <= 60 : false;
+    return safeStillFuture || recentSell;
+  });
+  const dismissed = ld("dismissedConflicts", []);
+  const seen = new Set();
+  let c = 0;
+  for (const co of relevantConflicts) {
+    const key = co.ticker + "-" + co.sellDate;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (dismissed.includes(key)) continue;
+    c++;
+  }
+  const l = Object.values(S.lockouts).filter(d => d >= tod()).length;
+  const ce = document.getElementById("st-c");
+  const lv = document.getElementById("sv-l");
+  const tv = document.getElementById("sv-t");
+  if (ce) ce.className = "stat" + (c > 0 ? " danger" : "");
+  const svc = document.getElementById("sv-c");
+  if (svc) { svc.textContent = c; svc.className = "sv" + (c > 0 ? " danger" : ""); }
+  if (lv) lv.textContent = l;
+  if (tv) tv.textContent = S.trades.length;
 }
 
 
@@ -2714,7 +2786,7 @@ function renderDash(){
       const isFuture = c.safe >= today;
       const el=document.createElement("div"); el.className="alert-banner";
       el.style.position = "relative";
-      el.innerHTML=`<button onclick="dismissConflict('${key}')" style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,.3);border:none;color:rgba(255,255,255,.7);width:24px;height:24px;border-radius:50%;cursor:pointer;font-size:14px;font-weight:700;line-height:1;display:flex;align-items:center;justify-content:center;z-index:10" title="Dismiss">×</button><div class="at">⚠️ ${c.ticker} — Wash Sale</div><div class="ab">Sold at a loss on ${fmt(c.sellDate)}, then bought on ${fmt(c.buyDate)} — only ${c.days} days apart. This loss cannot be deducted.</div><div class="atax"><div><div class="atl">Extra tax you may owe</div><div class="atv">$${c.tax.toLocaleString("en-US",{maximumFractionDigits:0})}</div></div><div style="font-size:11px;color:var(--muted)">@ 37% rate</div></div>${isFuture?`<div class="safe-box"><div class="sl2">✅ Safe to rebuy ${c.ticker} after:</div><div class="sv2">${fmt(c.safe)}</div></div>`:`<div class="safe-box"><div class="sl2">✅ Safe date has passed — you can rebuy ${c.ticker} now</div></div>`}`;
+      el.innerHTML=`<button onclick="dismissConflict('${key}')" style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,.3);border:none;color:rgba(255,255,255,.7);width:24px;height:24px;border-radius:50%;cursor:pointer;font-size:14px;font-weight:700;line-height:1;display:flex;align-items:center;justify-content:center;z-index:10" title="Dismiss">×</button><div class="at">⚠️ ${c.ticker} — Wash Sale</div><div class="ab">Sold at a loss on ${fmt(c.sellDate)}, then bought on ${fmt(c.buyDate)} — only ${c.days} days apart. This loss cannot be deducted.</div><div class="atax"><div><div class="atl">Extra tax you may owe</div><div class="atv">$${c.tax.toLocaleString("en-US",{maximumFractionDigits:0})}</div></div><div style="font-size:11px;color:var(--muted)">@ ${(S.cfg.taxBracket || 37) + 3.8}% combined</div></div>${isFuture?`<div class="safe-box"><div class="sl2">✅ Safe to rebuy ${c.ticker} after:</div><div class="sv2">${fmt(c.safe)}</div></div>`:`<div class="safe-box"><div class="sl2">✅ Safe date has passed — you can rebuy ${c.ticker} now</div></div>`}`;
       aw.appendChild(el);
     }
     // Update label with actual shown count
@@ -3150,11 +3222,11 @@ Suggest 3 alternative stocks or ETFs you can buy RIGHT NOW instead of ${ticker}.
 Return ONLY valid JSON array, no markdown:
 [{"ticker":"NVDA","reason":"One short plain sentence why this works","sector":"Chips","price":201.50},{"ticker":"SOXX","reason":"...","sector":"ETF","price":184.20},{"ticker":"INTC","reason":"...","sector":"Chips","price":21.30}]`;
 
-    const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":S.cfg.apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-opus-4-7",max_tokens:400,system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader.",
+    const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":S.cfg.apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-opus-4-7",max_tokens:400,system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
         messages:[{role:"user",content:prompt}]})});
     const data=await res.json();
     const text=data.content?.[0]?.text||"";
-    const parsed=JSON.parse(text.replace(/```json|```/g,"").trim());
+    const parsed=replacePriceTokens(JSON.parse(text.replace(/```json|```/g,"").trim()));
     return parsed.map(a=>({ticker:a.ticker,reason:a.reason+(a.price?` Current price: $${a.price}.`:""),sector:a.sector}));
   }catch(e){
     return local;
@@ -3357,6 +3429,229 @@ function sanitizeVoice(obj) {
   }
   return obj;
 }
+
+function replacePriceTokens(obj) {
+  // Recursively replace [CURRENT_PRICE:TICKER] tokens with real live prices
+  if (typeof obj === "string") {
+    return obj.replace(/\[CURRENT_PRICE:([A-Z]+)\]/g, function(m, ticker) {
+      const live = S.prices && S.prices[ticker];
+      if (live && live.current) return "$" + live.current.toFixed(2);
+      const close = S.closingPrices && S.closingPrices[ticker];
+      if (close && close.price) return "$" + Number(close.price).toFixed(2);
+      return "[no live price]";
+    });
+  }
+  if (Array.isArray(obj)) return obj.map(replacePriceTokens);
+  if (obj && typeof obj === "object") {
+    const out = {};
+    for (const k in obj) out[k] = replacePriceTokens(obj[k]);
+    return out;
+  }
+  return obj;
+}
+
+
+
+// ═══════════════════════════════════════════════════════════════════
+// UNIFIED CONTEXT SYSTEM — Single source of truth for every AI call
+// ═══════════════════════════════════════════════════════════════════
+
+function buildUnifiedContext() {
+  const now = new Date();
+  const ctx = {
+    asOfDate: now.toLocaleDateString("en-US", {timeZone: "America/New_York", weekday:"long", month:"long", day:"numeric", year:"numeric"}),
+    asOfTime: now.toLocaleTimeString("en-US", {timeZone: "America/New_York", hour:"numeric", minute:"2-digit"}),
+    todayISO: tod(),
+    marketSession: getTimeContext().session,
+    dataStatus: {
+      schwabRealizedImported: !!S.schwabRealized,
+      schwabPositionsImported: !!S.schwabPositions,
+      schwabLastImport: S.schwabRealized && S.schwabRealized.importedAt ? new Date(S.schwabRealized.importedAt).toLocaleDateString() : "never",
+      schwabThroughDate: S.schwabRealized ? S.schwabRealized.throughDate : null,
+      emailUpdatesSince: (S.schwabEmailUpdates || []).length,
+      livePricesLoaded: Object.keys(S.prices || {}).length,
+      pricesAgeMinutes: S.pricesUpdated ? Math.floor((Date.now() - S.pricesUpdated)/60000) : null
+    },
+    taxProfile: {
+      federalBracket: (S.cfg.taxBracket || 37),
+      ltCapitalGainsRate: (S.cfg.ltRate || 20),
+      state: S.cfg.state || "Florida",
+      niitApplies: true,
+      niitRate: 3.8,
+      combinedShortTermRate: (S.cfg.taxBracket || 37) + 3.8,
+      combinedLongTermRate: (S.cfg.ltRate || 20) + 3.8
+    },
+    ytdRealized: null,
+    currentPositions: [],
+    washSaleLockouts: [],
+    priceData: {}
+  };
+
+  if (S.schwabRealized) {
+    ctx.ytdRealized = {
+      totalRealized: S.schwabRealized.ytd_realized || 0,
+      shortTerm: S.schwabRealized.ytd_short_term || 0,
+      longTerm: S.schwabRealized.ytd_long_term || 0,
+      totalDisallowed: S.schwabRealized.ytd_disallowed || 0,
+      washSaleLotCount: S.schwabRealized.wash_sale_lots || 0,
+      totalLotCount: S.schwabRealized.total_lots || 0,
+      estimatedTaxOwed: Math.max(0, S.schwabRealized.ytd_short_term || 0) * (ctx.taxProfile.combinedShortTermRate/100) + Math.max(0, S.schwabRealized.ytd_long_term || 0) * (ctx.taxProfile.combinedLongTermRate/100),
+      perTicker: {}
+    };
+    for (const t in (S.schwabRealized.by_ticker || {})) {
+      const d = S.schwabRealized.by_ticker[t];
+      ctx.ytdRealized.perTicker[t] = {
+        realized: d.realized || 0,
+        disallowed: d.disallowed || 0,
+        lots: d.lots || 0,
+        washSaleLots: d.washSaleLots || 0
+      };
+    }
+  }
+
+  if (S.schwabPositions && S.schwabPositions.positions) {
+    for (const p of S.schwabPositions.positions) {
+      const live = S.prices ? S.prices[p.ticker] : null;
+      const currentPrice = (live && live.current) || p.currentPrice || p.costBasisPerShare;
+      const currentValue = p.shares * currentPrice;
+      const unrealized = currentValue - p.costBasisTotal;
+      const unrealizedPct = p.costBasisTotal > 0 ? (unrealized / p.costBasisTotal) * 100 : 0;
+      const rt = ctx.ytdRealized && ctx.ytdRealized.perTicker[p.ticker];
+      ctx.currentPositions.push({
+        ticker: p.ticker,
+        shares: p.shares,
+        avgCost: p.costBasisPerShare,
+        costBasisTotal: p.costBasisTotal,
+        currentPrice: currentPrice,
+        currentValue: currentValue,
+        unrealizedGL: unrealized,
+        unrealizedPct: unrealizedPct,
+        priceIsLive: !!(live && live.current),
+        dayChange: live ? (live.change || 0) : 0,
+        realizedYTD: rt ? rt.realized : 0,
+        washSaleDisallowedYTD: rt ? rt.disallowed : 0
+      });
+    }
+    ctx.currentPositions.sort((a,b) => b.currentValue - a.currentValue);
+  }
+
+  const today = tod();
+  for (const t in (S.lockouts || {})) {
+    const safeDate = S.lockouts[t];
+    if (safeDate >= today) {
+      ctx.washSaleLockouts.push({
+        ticker: t,
+        safeToRebuyAfter: safeDate,
+        daysRemaining: dbet(today, safeDate)
+      });
+    }
+  }
+
+  for (const t in (S.prices || {})) {
+    const d = S.prices[t];
+    ctx.priceData[t] = {current: d.current, change: d.change, changePct: d.changePct};
+  }
+
+  return ctx;
+}
+
+function formatContextForPrompt(ctx, options) {
+  options = options || {};
+  const maxPos = options.maxPositions || 20;
+  let txt = "CONTEXT (authoritative data — do NOT invent numbers):\n\n";
+  txt += "Today: " + ctx.asOfDate + " (" + ctx.asOfTime + " ET, " + ctx.marketSession + ")\n";
+  txt += "Tax profile: " + ctx.taxProfile.federalBracket + "% fed + " + ctx.taxProfile.niitRate + "% NIIT = " + ctx.taxProfile.combinedShortTermRate + "% combined on ST. State: " + ctx.taxProfile.state + " (no tax).\n\n";
+
+  txt += "DATA STATUS:\n";
+  txt += "- Schwab Realized G/L CSV: " + (ctx.dataStatus.schwabRealizedImported ? ("Imported " + ctx.dataStatus.schwabLastImport + ", covers through " + ctx.dataStatus.schwabThroughDate) : "NOT IMPORTED — numbers may be missing") + "\n";
+  txt += "- Schwab Positions CSV: " + (ctx.dataStatus.schwabPositionsImported ? "Imported" : "NOT IMPORTED") + "\n";
+  txt += "- Live prices: " + ctx.dataStatus.livePricesLoaded + " tickers loaded\n\n";
+
+  if (ctx.ytdRealized && options.includeRealized !== false) {
+    txt += "YTD REALIZED (Schwab authoritative):\n";
+    txt += "- Total: $" + ctx.ytdRealized.totalRealized.toFixed(0) + " (ST: $" + ctx.ytdRealized.shortTerm.toFixed(0) + ", LT: $" + ctx.ytdRealized.longTerm.toFixed(0) + ")\n";
+    txt += "- Wash sale phantom losses: $" + ctx.ytdRealized.totalDisallowed.toFixed(0) + " disallowed (" + ctx.ytdRealized.washSaleLotCount + " lots)\n";
+    txt += "- Est federal+NIIT tax: $" + ctx.ytdRealized.estimatedTaxOwed.toFixed(0) + "\n\n";
+    txt += "TOP 10 TICKERS BY REALIZED IMPACT (sign matters, negative = loss on that ticker):\n";
+    const sorted = Object.entries(ctx.ytdRealized.perTicker).sort((a,b) => Math.abs(b[1].realized) - Math.abs(a[1].realized)).slice(0,10);
+    for (const [t, d] of sorted) {
+      const sign = d.realized >= 0 ? "+" : "";
+      txt += "  " + t + ": " + sign + "$" + d.realized.toFixed(0) + " realized, $" + d.disallowed.toFixed(0) + " wash-sale disallowed (" + d.lots + " lots)\n";
+    }
+    txt += "\n";
+  }
+
+  if (ctx.currentPositions.length && options.includePositions !== false) {
+    txt += "CURRENT POSITIONS (Schwab, top " + Math.min(maxPos, ctx.currentPositions.length) + " by value):\n";
+    for (const p of ctx.currentPositions.slice(0, maxPos)) {
+      const priceNote = p.priceIsLive ? "" : " (no live price)";
+      const sign = p.unrealizedGL >= 0 ? "+" : "";
+      txt += "  " + p.ticker + ": " + p.shares + " sh @ $" + p.avgCost.toFixed(2) + " cost, now $" + p.currentPrice.toFixed(2) + priceNote + ". Unrealized " + sign + "$" + p.unrealizedGL.toFixed(0) + " (" + p.unrealizedPct.toFixed(1) + "%). YTD realized on this ticker: $" + p.realizedYTD.toFixed(0) + ", wash disallowed: $" + p.washSaleDisallowedYTD.toFixed(0) + "\n";
+    }
+    txt += "\n";
+  }
+
+  if (ctx.washSaleLockouts.length && options.includeLockouts !== false) {
+    txt += "ACTIVE WASH SALE LOCKOUTS (do NOT recommend selling at loss or rebuying before safe date):\n";
+    for (const l of ctx.washSaleLockouts.slice(0, 15)) {
+      txt += "  " + l.ticker + ": safe after " + l.safeToRebuyAfter + " (" + l.daysRemaining + " days)\n";
+    }
+    txt += "\n";
+  }
+  return txt;
+}
+
+async function callAI(userPrompt, options) {
+  options = options || {};
+  if (!S.cfg.apiKey) throw new Error("No API key configured");
+  const maxTokens = options.maxTokens || 2000;
+  const purpose = options.purpose || "analysis";
+  const systemMsg = [
+    "You are a personal trading advisor. Address the reader as \"you\" and \"your\" — NEVER use \"him\", \"he\", \"his\", \"Morris\", or third-person references.",
+    "",
+    "ANTI-HALLUCINATION RULES (strict):",
+    "1. Do NOT invent stock prices. Use [CURRENT_PRICE:TICKER] placeholder — the app inserts real prices.",
+    "2. Do NOT invent calendar dates or reference holidays not stated in the Today field.",
+    "3. Do NOT claim the user \"won\" or \"made money\" on a ticker without checking realized gain data. If realized is negative, acknowledge loss.",
+    "4. Do NOT contradict the CONTEXT. If a ticker is wash-sale-locked, never recommend selling it at a loss.",
+    "5. If needed data is missing, SAY SO — never fabricate.",
+    "6. Keep language simple — your reader's English is their second language.",
+    "",
+    "Purpose: " + purpose
+  ].join("\n");
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": S.cfg.apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true"
+    },
+    body: JSON.stringify({
+      model: "claude-opus-4-7",
+      max_tokens: maxTokens,
+      system: systemMsg,
+      messages: [{role: "user", content: userPrompt}]
+    })
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error("AI error " + res.status + ": " + err.substring(0, 200));
+  }
+  const data = await res.json();
+  let text = (data.content && data.content[0] && data.content[0].text) || "";
+  // Inject real prices for [CURRENT_PRICE:TICKER] placeholders
+  text = text.replace(/\[CURRENT_PRICE:([A-Z]+)\]/g, function(m, ticker) {
+    const live = S.prices && S.prices[ticker];
+    if (live && live.current) return "$" + live.current.toFixed(2);
+    return "[price unavailable]";
+  });
+  return text;
+}
+
+
 
 
 // ═══════════════════════════════════════════════════════════════════
@@ -3667,7 +3962,9 @@ async function runOpportunityScanner() {
   const winningTickers = stats.bestTickers.slice(0,10).map(t => `${t.ticker} (net +$${t.net.toLocaleString()})`).join(", ");
   const losingTickers = stats.worstTickers.slice(0,5).map(t => `${t.ticker} (net -$${Math.abs(t.net).toLocaleString()})`).join(", ");
   
-  const prompt = `You are a wealth-building advisor. Address the reader directly as "you" and "your". NEVER use "him", "he", "his", "Morris", or "the trader". English is your reader\'s second language — use SHORT plain sentences.
+  const unifiedCtx = buildUnifiedContext();
+  const unifiedCtxText = formatContextForPrompt(unifiedCtx, {maxPositions: 15});
+  const prompt = unifiedCtxText + `\n\nYou are a wealth-building advisor. Address the reader directly as "you" and "your". NEVER use "him", "he", "his", "Morris", or "the trader". English is your reader\'s second language — use SHORT plain sentences.
 
 You currently hold: ${currentTickers}
 
@@ -3724,7 +4021,7 @@ CRITICAL: Every sentence uses "you/your" — NEVER "him/his/he/Morris/the trader
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {"Content-Type": "application/json", "x-api-key": S.cfg.apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true"},
-      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 4000, system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader.",
+      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 4000, system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
         messages: [{role: "user", content: prompt}]})
     });
     const data = await res.json();
@@ -3762,7 +4059,9 @@ async function runPortfolioXray() {
   
   const posStr = positions.map(p => `${p.ticker}: $${(p.value/1000).toFixed(1)}K (${((p.value/totalVal)*100).toFixed(1)}%) — ${p.sector}`).join("\n");
   
-  const prompt = `You have a $${(totalVal/1000000).toFixed(2)}M portfolio. Run a deep X-ray analysis.
+  const unifiedCtx = buildUnifiedContext();
+  const unifiedCtxText = formatContextForPrompt(unifiedCtx, {maxPositions: 25});
+  const prompt = unifiedCtxText + `\n\nYou have a $${(totalVal/1000000).toFixed(2)}M portfolio. Run a deep X-ray analysis.
 
 Address the reader directly as "you" — NEVER say "him", "he", "his", "Morris", or "the trader".
 
@@ -3798,7 +4097,7 @@ CRITICAL: Every sentence uses "you/your" — NEVER "him/his/he/Morris/the trader
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {"Content-Type": "application/json", "x-api-key": S.cfg.apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true"},
-      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 3000, system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader.",
+      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 3000, system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
         messages: [{role: "user", content: prompt}]})
     });
     const data = await res.json();
@@ -3850,7 +4149,9 @@ async function runPositionOptimizer() {
   
   const posStr = positions.map(p => `${p.ticker}: ${p.shares} sh @ $${p.avg_cost.toFixed(2)} (now $${p.current_price.toFixed(2)}), unrealized ${p.unrealized_pct}% ($${p.unrealized.toFixed(0)}), ${p.wash_locked ? "WASH-LOCKED" : "free to sell"}, hist win rate ${p.historical_winrate || "N/A"}%`).join("\n");
   
-  const prompt = `Rate every position in YOUR portfolio with an action. Be direct and specific.
+  const unifiedCtx = buildUnifiedContext();
+  const unifiedCtxText = formatContextForPrompt(unifiedCtx, {maxPositions: 25});
+  const prompt = unifiedCtxText + `\n\nRate every position in YOUR portfolio with an action. Be direct and specific.
 
 Address the reader directly as "you" — NEVER use "him", "he", "his", "Morris", or "the trader".
 
@@ -3882,7 +4183,7 @@ CRITICAL: Every reason uses "you/your" — NEVER "him/his/he/Morris".`;
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {"Content-Type": "application/json", "x-api-key": S.cfg.apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true"},
-      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 6000, system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader.",
+      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 6000, system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
         messages: [{role: "user", content: prompt}]})
     });
     const data = await res.json();
