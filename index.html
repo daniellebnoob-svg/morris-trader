@@ -579,35 +579,58 @@ async function readSchwabEmails() {
           body: JSON.stringify({
             model: "claude-opus-4-7",
             max_tokens: 500,
-            system: "You extract trade data from Schwab emails. Return ONLY valid JSON with no markdown. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
+            system: "You extract trade execution data from Schwab 'trade was executed' emails. These emails contain REAL execution prices which must be captured accurately. Return ONLY valid JSON with no markdown.",
             messages: [{role: "user", content: 
-              `Extract trade(s) from this Schwab email. Subject: "${subject}". Date: ${msgDate}.
-              
+              `Extract the trade from this Schwab trade execution email. These emails have a standard format:
+- "Settlement date: MM/DD/YYYY"
+- "Action: Bought" or "Action: Sold"
+- "Quantity: N"
+- "Symbol: TICKER"
+- "Unit price: $X.XX"
+- "Principal amount: $Y.YY"
+
+The "trade executed on MM/DD/YYYY" line gives the trade date (use that, not settlement date).
+
+Email subject: "${subject}"
+Email date header: ${msgDate}
+
 Email body:
 ${cleanText}
 
-Return JSON: {"trades":[{"ticker":"SYMBOL","action":"BUY|SELL","shares":100,"price":45.67,"proceeds":4567,"date":"YYYY-MM-DD"}]}
+Return JSON: {"trades":[{"ticker":"SYMBOL","action":"BUY","shares":100,"executionPrice":45.67,"proceeds":4567,"tradeDate":"YYYY-MM-DD"}]}
 
-If no trade info visible, return {"trades":[]}. If multiple trades, include all.`
+Rules:
+- action: "BUY" if email says "Bought", "SELL" if email says "Sold"
+- executionPrice: from "Unit price: $X.XX"  (this is the REAL execution price from Schwab, not a guess)
+- proceeds: from "Principal amount: $Y.YY" 
+- tradeDate: from "trade executed on MM/DD/YYYY" line, converted to YYYY-MM-DD
+- If no trade data visible (not a trade email), return {"trades":[]}
+- If multiple trades in one email, include all. Each email usually has one trade.`
             }]
           })
         });
         const aiData = await aiRes.json();
         const text = aiData.content?.[0]?.text || "{}";
-        const parsed = replacePriceTokens(JSON.parse(text.replace(/\`\`\`json|\`\`\`/g, "").trim()));
+        const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
         
         if (parsed.trades?.length > 0) {
           for (const t of parsed.trades) {
+            // Validate required fields
+            if (!t.ticker || !t.action || !t.shares || !t.executionPrice) {
+              console.warn("Incomplete trade parse:", t);
+              continue;
+            }
             updates.push({
               messageId: m.id,
-              ticker: t.ticker,
-              action: t.action,
-              shares: t.shares,
-              price: t.price,
-              proceeds: t.proceeds || (t.shares * t.price),
-              date: t.date || msgDate,
+              ticker: t.ticker.toUpperCase(),
+              action: t.action.toUpperCase(),
+              shares: Number(t.shares),
+              price: Number(t.executionPrice),   // RENAMED for clarity
+              proceeds: Number(t.proceeds) || (Number(t.shares) * Number(t.executionPrice)),
+              date: t.tradeDate || msgDate,
               parsedAt: new Date().toISOString(),
-              source: "schwab-email-estimate"
+              source: "schwab-email-estimate",
+              emailSubject: subject
             });
           }
         }
@@ -697,25 +720,9 @@ async function fetchLivePrices() {
 }
 
 async function fetchHistoricalPrices(ticker, daysBack = 365) {
-  if (!S.cfg.finnhubKey) return null;
-  try {
-    const to = Math.floor(Date.now() / 1000);
-    const from = to - (daysBack * 86400);
-    const res = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${ticker}&resolution=D&from=${from}&to=${to}&token=${S.cfg.finnhubKey}`);
-    const data = await res.json();
-    if (data.s !== "ok") return null;
-    return data.c.map((close, i) => ({
-      date: new Date(data.t[i] * 1000).toISOString().split("T")[0],
-      open: data.o[i],
-      high: data.h[i],
-      low: data.l[i],
-      close: close,
-      volume: data.v[i]
-    }));
-  } catch(e) {
-    console.log("Historical fetch failed:", e);
-    return null;
-  }
+  // DISABLED: /candle endpoint requires Finnhub paid tier.
+  // Free tier returns 403 (Forbidden). Backtest feature falls back to "unavailable" instead.
+  return null;
 }
 
 async function fetchEarningsCalendar() {
@@ -1278,20 +1285,22 @@ Return ONLY valid JSON, no markdown:
   "market_mood": "bullish OR bearish OR mixed",
   "key_events": "One sentence about biggest market event right now",
   "news": [
-    {"ticker": "NVDA", "summary": "CURRENT news — 1-2 short plain sentences. Use [CURRENT_PRICE:NVDA] if you need to mention the price", "impact": "good OR bad OR neutral", "price_placeholder": "[CURRENT_PRICE:NVDA]", "is_holding": true, "affects": []},
-    {"ticker": "TSM", "summary": "TSM earnings miss — chip sector under pressure", "impact": "bad", "price_placeholder": "[CURRENT_PRICE:TSM]", "is_holding": false, "affects": ["NVDA", "AMD", "AVGO"]}
+    {"ticker": "NVDA", "summary": "CURRENT news — 1-2 short plain sentences. Do NOT mention stock prices in the summary.", "impact": "good OR bad OR neutral", "is_holding": true, "affects": []},
+    {"ticker": "TSM", "summary": "TSM earnings miss — chip sector under pressure", "impact": "bad", "is_holding": false, "affects": ["NVDA", "AMD", "AVGO"]}
   ],
-  "conservative": {"theme": "...", "trades": [{"action": "BUY OR SELL OR HOLD", "ticker": "AMD", "shares": 25, "price_placeholder": "[CURRENT_PRICE:AMD]", "reason": "...", "wash_risk": false}]},
+  "conservative": {"theme": "...", "trades": [{"action": "BUY OR SELL OR HOLD", "ticker": "AMD", "shares": 25, "reason": "Short plain reason", "wash_risk": false}]},
+  // IMPORTANT: Do NOT include a "price" field. The app injects real live prices.
   "moderate": {"theme": "...", "trades": [...]},
   "active": {"theme": "...", "trades": [...]}
 }
 
 Rules:
 - CRITICAL: Use CONTEXT above as single source of truth. Do NOT contradict YTD realized numbers, positions, or lockouts.
-- CRITICAL: Do NOT invent stock prices. Use [CURRENT_PRICE:TICKER] placeholder for any current price. The app injects real prices.
+- CRITICAL: Do NOT include stock prices in your response AT ALL. The app handles all price display. Never write dollar amounts for current prices. Omit the "price" field from JSON. Your job is analysis; the app handles numbers.
 - CRITICAL: Do NOT reference holidays, events, or days not explicitly in the Today date above. No "Good Friday", "Memorial Day", etc. unless Today matches.
 - CRITICAL: If YTD realized for a ticker is NEGATIVE, do not claim you "won big" or "made money" on it. Acknowledge the loss.
 - CRITICAL: NEVER recommend selling at a loss on a wash-sale-locked ticker (see LOCKOUTS in context).
+- CRITICAL: Only recommend SELL or HOLD for tickers listed in CURRENT POSITIONS. Never recommend SELL/HOLD for a ticker not in the positions list — you can only BUY things not currently held.
 - news should mix: your direct holdings (is_holding: true) AND sector competitors that affect your stocks (is_holding: false, affects: [list of your holdings])
 - For sector news, "affects" array must list which of YOUR tickers are impacted
 - conservative: 2 suggestions max · moderate: 3-4 · active: 4-5
@@ -1307,7 +1316,7 @@ Rules:
       body:JSON.stringify({
         model:"claude-opus-4-7",
         max_tokens:4000,
-        system: "You are a real-time market analyst. Always use the most current market information available to you. Factor in time of day, session, and recent news. Be specific with prices. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
+        system: "You are a real-time market analyst. Always use the most current market information available to you. Factor in time of day, session, and recent news. Be specific with prices. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) DO NOT include stock prices anywhere. The app displays real live prices next to each ticker. Never write dollar amounts for current prices. Omit price fields from JSON output entirely. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
         messages:[{role:"user",content:prompt}]
       })
     });
@@ -1487,7 +1496,7 @@ async function testAPIKey() {
       body: JSON.stringify({
         model: "claude-opus-4-7",
         max_tokens: 50,
-        system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
+        system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) DO NOT include stock prices anywhere. The app displays real live prices next to each ticker. Never write dollar amounts for current prices. Omit price fields from JSON output entirely. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
         messages: [{role: "user", content: "Say hi in 3 words"}]
       })
     });
@@ -1867,7 +1876,7 @@ RULES:
       body: JSON.stringify({
         model: "claude-opus-4-7",
         max_tokens: 3000,
-        system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
+        system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) DO NOT include stock prices anywhere. The app displays real live prices next to each ticker. Never write dollar amounts for current prices. Omit price fields from JSON output entirely. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
         messages: [{role: "user", content: prompt}]
       })
     });
@@ -2105,13 +2114,46 @@ function renderTaxes() {
     <div style="font-size:12px;font-weight:700;color:var(--gold2);margin-bottom:8px">📖 Reading This Table</div>
     <div style="font-size:12px;color:rgba(255,255,255,.85);line-height:1.7">
       <b>LOTS</b> = how many times you closed out shares of that stock (each BUY→SELL cycle is one lot).<br>
-      <b>REALIZED</b> = your actual profit or loss on that ticker this year. Green = you made money, red = you lost money.<br>
-      <b>WASH SALE $</b> = losses the IRS will NOT let you deduct this year because you rebought within 30 days. These losses aren't permanently lost — they get added to your future cost basis, but you don't get the tax benefit right now.
+      <b>REALIZED</b> = your actual cash profit or loss on that ticker this year. Green = you made money, red = you lost money.<br>
+      <b>WASH SALE $</b> = losses <u>inside</u> the realized number above that the IRS won't let you deduct this year because you rebought within 30 days.
+    </div>
+    <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.1);font-size:11px;color:rgba(255,255,255,.75);line-height:1.6">
+      <b style="color:var(--warn2)">Worked example — MU:</b><br>
+      Real cash result: <b style="color:var(--red2)">–$152K (lost money)</b>.<br>
+      Of the losses making up that number, <b style="color:var(--warn2)">$290K</b> were wash sales.<br>
+      Because those $290K of losses can't be deducted this year, the IRS treats your year as if it had $290K more gain than it really did. At your ${(S.cfg.taxBracket || 37) + 3.8}% combined rate, that's <b style="color:var(--gold2)">~$${Math.round(290000 * ((S.cfg.taxBracket || 37) + 3.8) / 100 / 1000)}K extra tax</b> you owe on MU alone that you wouldn't owe if you'd waited 31 days between sell and rebuy.<br>
+      The $290K isn't permanently lost — it gets added to your future MU cost basis — but you don't get the tax benefit now.
     </div>
   </div>`;
 
+  // ═══ UNREALIZED SNAPSHOT (from current positions) ═══
+  if (S.schwabPositions && S.schwabPositions.positions && S.schwabPositions.positions.length > 0) {
+    let unrealTotal = 0, unrealGainTotal = 0, unrealLossTotal = 0;
+    const unrealPositions = [];
+    for (const p of S.schwabPositions.positions) {
+      const live = S.prices && S.prices[p.ticker];
+      const currentPrice = (live && live.current) || p.currentPrice || p.costBasisPerShare;
+      const currentValue = p.shares * currentPrice;
+      const unreal = currentValue - p.costBasisTotal;
+      unrealTotal += unreal;
+      if (unreal >= 0) unrealGainTotal += unreal; else unrealLossTotal += unreal;
+      unrealPositions.push({ticker: p.ticker, unreal, shares: p.shares, pct: p.costBasisTotal > 0 ? (unreal/p.costBasisTotal)*100 : 0});
+    }
+    const unrealColor = unrealTotal >= 0 ? 'var(--green2)' : 'var(--red2)';
+    html += `<div class="sec-lbl">Unrealized Positions (Open Holdings)</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:9px;line-height:1.5">These are losses/gains you have RIGHT NOW on stocks you still hold. Not yet on your tax bill — only counts when you sell.</div>
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:13px;padding:14px;margin-bottom:12px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px">
+        <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.05em">Total Unrealized</div><div style="font-family:'Playfair Display',serif;font-size:22px;font-weight:800;color:${unrealColor}">${fmtMoneyDetail(unrealTotal)}</div></div>
+        <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.05em">Unrealized Losses Available</div><div style="font-family:'Playfair Display',serif;font-size:22px;font-weight:800;color:var(--red2)">${fmtMoneyDetail(unrealLossTotal)}</div></div>
+      </div>
+      <div style="font-size:11px;color:rgba(255,255,255,.75);padding-top:10px;border-top:1px solid rgba(255,255,255,.08);line-height:1.6">If you harvested ALL available unrealized losses cleanly (no wash sale), you could offset <b style="color:var(--green2)">~${fmtMoneyDetail(Math.abs(unrealLossTotal) * ((S.cfg.taxBracket || 37) + 3.8) / 100)} in taxes</b> — but many are currently locked due to recent rebuys. See Harvest Opportunities below for what's actually safe today.</div>
+    </div>`;
+  }
+  
   // ═══ PER-TICKER BREAKDOWN ═══
   html += `<div class="sec-lbl">Per-Ticker Tax Impact</div>`;
+  html += `<div style="font-size:11px;color:var(--muted);margin-bottom:9px;line-height:1.5">Only shows stocks you have <b>sold</b> this year. Stocks you currently hold but haven't sold (like CRM, NOW, MSTX) won't appear here because there's no realized gain/loss to report. Those show up in Harvest Opportunities below if they have unrealized losses.</div>`;
   const tickers = Object.entries(r.by_ticker)
     .filter(([t, d]) => Math.abs(d.realized) > 100 || Math.abs(d.disallowed) > 100)
     .sort((a, b) => Math.abs(b[1].realized) + Math.abs(b[1].disallowed) - (Math.abs(a[1].realized) + Math.abs(a[1].disallowed)));
@@ -2504,7 +2546,7 @@ async function runAIAlternatives(ticker) {
       body: JSON.stringify({
         model: "claude-opus-4-7",
         max_tokens: 1000,
-        system: "You are a trading advisor. Address the user directly as 'you'. Never use 'him', 'his', 'Morris', or third-person references. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
+        system: "You are a trading advisor. Address the user directly as 'you'. Never use 'him', 'his', 'Morris', or third-person references. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) DO NOT include stock prices anywhere. The app displays real live prices next to each ticker. Never write dollar amounts for current prices. Omit price fields from JSON output entirely. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
         messages: [{role: "user", content: 
           `You want to sell ${ticker} to harvest a loss but need to stay in the same sector to not miss a rebound. Suggest 3 alternative stocks or ETFs to buy IMMEDIATELY today instead of ${ticker}.
 
@@ -2786,7 +2828,7 @@ function renderDash(){
       const isFuture = c.safe >= today;
       const el=document.createElement("div"); el.className="alert-banner";
       el.style.position = "relative";
-      el.innerHTML=`<button onclick="dismissConflict('${key}')" style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,.3);border:none;color:rgba(255,255,255,.7);width:24px;height:24px;border-radius:50%;cursor:pointer;font-size:14px;font-weight:700;line-height:1;display:flex;align-items:center;justify-content:center;z-index:10" title="Dismiss">×</button><div class="at">⚠️ ${c.ticker} — Wash Sale</div><div class="ab">Sold at a loss on ${fmt(c.sellDate)}, then bought on ${fmt(c.buyDate)} — only ${c.days} days apart. This loss cannot be deducted.</div><div class="atax"><div><div class="atl">Extra tax you may owe</div><div class="atv">$${c.tax.toLocaleString("en-US",{maximumFractionDigits:0})}</div></div><div style="font-size:11px;color:var(--muted)">@ ${(S.cfg.taxBracket || 37) + 3.8}% combined</div></div>${isFuture?`<div class="safe-box"><div class="sl2">✅ Safe to rebuy ${c.ticker} after:</div><div class="sv2">${fmt(c.safe)}</div></div>`:`<div class="safe-box"><div class="sl2">✅ Safe date has passed — you can rebuy ${c.ticker} now</div></div>`}`;
+      el.innerHTML=`<button onclick="dismissConflict('${key}')" style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,.3);border:none;color:rgba(255,255,255,.7);width:24px;height:24px;border-radius:50%;cursor:pointer;font-size:14px;font-weight:700;line-height:1;display:flex;align-items:center;justify-content:center;z-index:10" title="Dismiss">×</button><div class="at">⚠️ ${c.ticker} — Wash Sale</div><div class="ab">You sold ${c.ticker} at a loss on ${fmt(c.sellDate)}. Because you rebought ${c.ticker} within 30 days of that sell, the IRS disallows this loss — you cannot deduct it this tax year.</div><div class="atax"><div><div class="atl">Extra tax you may owe</div><div class="atv">$${c.tax.toLocaleString("en-US",{maximumFractionDigits:0})}</div></div><div style="font-size:11px;color:var(--muted)">@ ${(S.cfg.taxBracket || 37) + 3.8}% combined</div></div>${isFuture?`<div class="safe-box"><div class="sl2">✅ Safe to rebuy ${c.ticker} after:</div><div class="sv2">${fmt(c.safe)}</div></div>`:`<div class="safe-box"><div class="sl2">✅ Safe date has passed — you can rebuy ${c.ticker} now</div></div>`}`;
       aw.appendChild(el);
     }
     // Update label with actual shown count
@@ -2818,16 +2860,35 @@ function renderBrief(){
   const ml={bullish:"📈 Bullish",bearish:"📉 Bearish",mixed:"〰️ Mixed"}[b.market_mood]||"〰️ Mixed";
   const ii={good:"📈",bad:"📉",neutral:"➡️"};
   const mdata=b[S.mode]||{};
+
+  // Build set of tickers you actually hold (from Schwab authoritative data)
+  const heldTickers = new Set();
+  if (S.schwabPositions?.positions) {
+    for (const p of S.schwabPositions.positions) heldTickers.add(p.ticker);
+  }
+
+  // Helper: render live price — ALWAYS from S.prices, NEVER from AI
+  function getLivePrice(ticker) {
+    const live = S.prices?.[ticker];
+    if (live?.current) return "$" + live.current.toFixed(2);
+    const close = S.closingPrices?.[ticker];
+    if (close?.price) return "$" + Number(close.price).toFixed(2);
+    return "—";
+  }
+
   let news="";
   for(const n of (b.news||[])) {
-    const priceTag = n.price ? `<span style="font-size:11px;color:var(--gold2);font-weight:700;margin-left:6px">$${parseFloat(n.price).toFixed(2)}</span>` : "";
-    const isHolding = n.is_holding !== false;  // default true for backwards compat
+    const livePriceStr = getLivePrice(n.ticker);
+    const priceTag = livePriceStr !== "—" 
+      ? `<span style="font-size:11px;color:var(--gold2);font-weight:700;margin-left:6px">${livePriceStr}</span>` 
+      : "";
+    const isHolding = heldTickers.has(n.ticker);  // use ACTUAL Schwab data, not AI claim
     const affects = n.affects && n.affects.length ? n.affects : null;
-    
+
     let badge = "";
     let borderColor = "var(--border)";
     let bgColor = "var(--card)";
-    
+
     if (isHolding) {
       badge = '<span style="font-size:9px;font-weight:800;color:var(--green2);background:rgba(5,150,105,.2);padding:2px 7px;border-radius:10px;margin-left:6px;letter-spacing:.04em">YOU HOLD</span>';
       borderColor = "rgba(167,243,208,.25)";
@@ -2837,15 +2898,31 @@ function renderBrief(){
       borderColor = "rgba(253,230,138,.3)";
       bgColor = "rgba(217,119,6,.05)";
     }
-    
+
     news += `<div class="news-item" style="border-color:${borderColor};background:${bgColor}"><div class="ni">${ii[n.impact]||"➡️"}</div><div style="flex:1"><div class="nt" style="display:flex;align-items:center;flex-wrap:wrap">${n.ticker}${priceTag}${badge}</div><div class="nb">${n.summary}</div></div></div>`;
   }
+
+  // Filter out hallucinated SELL/HOLD recommendations (tickers not actually held)
   let trades="";
+  let filteredCount = 0;
   for(const t of (mdata.trades||[])){
     const ac=(t.action||"HOLD").toLowerCase();
-    trades+=`<div class="sug-card${t.wash_risk?" wr":""}"><div class="sug-top"><div class="sug-l"><span class="sa ${ac}">${t.action}</span><div><div class="stk">${t.ticker}</div>${t.wash_risk?'<div class="sw">⚠️ Lockout — check before trading</div>':"" }</div></div><div class="sug-r"><div class="sp">$${parseFloat(t.price||0).toFixed(2)}</div><div class="ss">${t.shares} shares</div></div></div><div class="sr">${t.reason}</div></div>`;
+    // SELL and HOLD only make sense on positions you actually own
+    if ((ac === "sell" || ac === "hold") && !heldTickers.has(t.ticker)) {
+      filteredCount++;
+      console.warn(`Brief recommended ${t.action} ${t.ticker} but you don't hold it — filtered`);
+      continue;
+    }
+    const livePriceStr = getLivePrice(t.ticker);
+    trades += `<div class="sug-card${t.wash_risk?" wr":""}"><div class="sug-top"><div class="sug-l"><span class="sa ${ac}">${t.action}</span><div><div class="stk">${t.ticker}</div>${t.wash_risk?'<div class="sw">⚠️ Lockout — check before trading</div>':"" }</div></div><div class="sug-r"><div class="sp">${livePriceStr}</div><div class="ss">${t.shares||"—"} shares</div></div></div><div class="sr">${t.reason}</div></div>`;
   }
-  el.innerHTML=`<div class="head-card"><div class="head-txt">${b.headline}</div><span class="mood ${md}">${ml}</span></div>${news?'<div class="sec-lbl">Your Holdings in the News</div>'+news:""}<div class="sec-lbl">${mdata.theme||"Today's Suggestions"}</div>${trades||'<div class="empty"><div>No suggestions for this mode.</div></div>'}`;
+
+  let filterNote = "";
+  if (filteredCount > 0) {
+    filterNote = `<div style="background:rgba(217,119,6,.08);border:1px solid rgba(253,230,138,.25);border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:11px;color:var(--warn2)">⚠️ Filtered ${filteredCount} suggestion${filteredCount>1?'s':''} for stocks you don't hold. AI sometimes hallucinates — we block those.</div>`;
+  }
+
+  el.innerHTML=`<div class="head-card"><div class="head-txt">${b.headline}</div><span class="mood ${md}">${ml}</span></div>${news?'<div class="sec-lbl">Your Holdings in the News</div>'+news:""}<div class="sec-lbl">${mdata.theme||"Today's Suggestions"}</div>${filterNote}${trades||'<div class="empty"><div>No suggestions for this mode.</div></div>'}`;
 }
 
 function renderTrades(){
@@ -3222,7 +3299,7 @@ Suggest 3 alternative stocks or ETFs you can buy RIGHT NOW instead of ${ticker}.
 Return ONLY valid JSON array, no markdown:
 [{"ticker":"NVDA","reason":"One short plain sentence why this works","sector":"Chips","price":201.50},{"ticker":"SOXX","reason":"...","sector":"ETF","price":184.20},{"ticker":"INTC","reason":"...","sector":"Chips","price":21.30}]`;
 
-    const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":S.cfg.apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-opus-4-7",max_tokens:400,system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
+    const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":S.cfg.apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-opus-4-7",max_tokens:400,system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) DO NOT include stock prices anywhere. The app displays real live prices next to each ticker. Never write dollar amounts for current prices. Omit price fields from JSON output entirely. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
         messages:[{role:"user",content:prompt}]})});
     const data=await res.json();
     const text=data.content?.[0]?.text||"";
@@ -3610,7 +3687,7 @@ async function callAI(userPrompt, options) {
     "You are a personal trading advisor. Address the reader as \"you\" and \"your\" — NEVER use \"him\", \"he\", \"his\", \"Morris\", or third-person references.",
     "",
     "ANTI-HALLUCINATION RULES (strict):",
-    "1. Do NOT invent stock prices. Use [CURRENT_PRICE:TICKER] placeholder — the app inserts real prices.",
+    "1. Do NOT include stock prices in your response. The app displays real live prices separately. Never write dollar amounts for current prices.",
     "2. Do NOT invent calendar dates or reference holidays not stated in the Today field.",
     "3. Do NOT claim the user \"won\" or \"made money\" on a ticker without checking realized gain data. If realized is negative, acknowledge loss.",
     "4. Do NOT contradict the CONTEXT. If a ticker is wash-sale-locked, never recommend selling it at a loss.",
@@ -4021,7 +4098,7 @@ CRITICAL: Every sentence uses "you/your" — NEVER "him/his/he/Morris/the trader
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {"Content-Type": "application/json", "x-api-key": S.cfg.apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true"},
-      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 4000, system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
+      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 4000, system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) DO NOT include stock prices anywhere. The app displays real live prices next to each ticker. Never write dollar amounts for current prices. Omit price fields from JSON output entirely. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
         messages: [{role: "user", content: prompt}]})
     });
     const data = await res.json();
@@ -4097,7 +4174,7 @@ CRITICAL: Every sentence uses "you/your" — NEVER "him/his/he/Morris/the trader
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {"Content-Type": "application/json", "x-api-key": S.cfg.apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true"},
-      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 3000, system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
+      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 3000, system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) DO NOT include stock prices anywhere. The app displays real live prices next to each ticker. Never write dollar amounts for current prices. Omit price fields from JSON output entirely. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
         messages: [{role: "user", content: prompt}]})
     });
     const data = await res.json();
@@ -4183,7 +4260,7 @@ CRITICAL: Every reason uses "you/your" — NEVER "him/his/he/Morris".`;
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {"Content-Type": "application/json", "x-api-key": S.cfg.apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true"},
-      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 6000, system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) For stock prices, use [CURRENT_PRICE:TICKER] placeholder - app injects real prices. Do NOT write literal dollar amounts for current prices. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
+      body: JSON.stringify({model: "claude-opus-4-7", max_tokens: 6000, system: "You are a personal trading advisor speaking DIRECTLY to the user. Address them as you and your in every sentence. NEVER use him, he, his, Morris, or the trader. The person reading this IS the trader. ANTI-HALLUCINATION: (1) Use CONTEXT block as single source of truth. (2) DO NOT include stock prices anywhere. The app displays real live prices next to each ticker. Never write dollar amounts for current prices. Omit price fields from JSON output entirely. (3) Never reference holidays/dates not in the Today field. (4) If YTD realized for a ticker is negative, do NOT claim 'you won' or 'made money' on it - acknowledge loss. (5) Never recommend selling at a loss on wash-sale-locked tickers.",
         messages: [{role: "user", content: prompt}]})
     });
     const data = await res.json();
