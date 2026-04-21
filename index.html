@@ -2519,8 +2519,15 @@ async function runWorthIt() {
   html += `<div style="background:linear-gradient(135deg,rgba(212,160,23,.2),rgba(217,119,6,.08));border:1.5px solid rgba(253,230,138,.35);border-radius:12px;padding:13px;margin-top:12px">
     <div style="font-size:11px;font-weight:700;color:var(--gold2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">💡 Verdict</div>`;
   
-  if (isLocked) {
-    html += `<div style="font-size:13px;color:#fff;line-height:1.6"><b>HOLD</b> until ${lockedUntil ? fmt(lockedUntil) : '31 days after last buy'}. Selling now triggers wash sale and wastes the tax deduction.</div>`;
+  if (isLocked || hasRecentBuy) {
+    const safeDate = lockedUntil || (hasRecentBuy ? (function(){
+      // Find latest buy date and add 31 days
+      const buys = S.trades.filter(t => t.ticker === ticker && t.action === "BUY");
+      if (!buys.length) return null;
+      const latest = buys.reduce((a,b) => a.date > b.date ? a : b);
+      return dadd(latest.date, 31);
+    })() : null);
+    html += `<div style="font-size:13px;color:#fff;line-height:1.6"><b>HOLD</b> until ${safeDate ? fmt(safeDate) : '31 days after your last buy'}. Selling now at a loss triggers a wash sale — the IRS disallows the loss and you get NO tax deduction. That's the worst possible outcome. ${gainLoss < 0 ? 'If you want the exposure without the wash-sale penalty, consider buying a safe alternative (below) instead of selling CRM.' : ''}</div>`;
   } else if (gainLoss < -5000) {
     html += `<div style="font-size:13px;color:#fff;line-height:1.6"><b>SELL + BUY ALTERNATIVE</b> is the winning move. You get <b style="color:var(--green2)">$${Math.abs(taxImpact).toFixed(0).toLocaleString()} in real tax savings</b> AND stay in the sector. The only risk is if ${ticker} rallies big in the next 31 days — but you can always buy it back after.</div>`;
   } else if (gainLoss > 20000) {
@@ -2697,7 +2704,20 @@ function renderStats(){
     if (dismissed.includes(key)) continue;
     c++;
   }
-  const l = Object.values(S.lockouts).filter(d => d >= tod()).length;
+  // Combined lockouts: S.lockouts + recent BUYS from S.trades (same logic as dashboard)
+  const todayISO = tod();
+  const combinedLockouts = Object.assign({}, S.lockouts || {});
+  if (S.trades && S.trades.length) {
+    for (const t of S.trades) {
+      if (t.action !== "BUY") continue;
+      if (dbet(t.date, todayISO) > 30) continue;
+      const safeAfter = dadd(t.date, 31);
+      if (!combinedLockouts[t.ticker] || combinedLockouts[t.ticker] < safeAfter) {
+        combinedLockouts[t.ticker] = safeAfter;
+      }
+    }
+  }
+  const l = Object.values(combinedLockouts).filter(d => d >= todayISO).length;
   const ce = document.getElementById("st-c");
   const lv = document.getElementById("sv-l");
   const tv = document.getElementById("sv-t");
@@ -2846,8 +2866,24 @@ function renderDash(){
     const firstLbl = aw.querySelector(".sec-lbl");
     if (firstLbl) firstLbl.textContent = `⚠️ ${shownCount} Active Conflict${shownCount !== 1 ? "s" : ""}`;
   }
-  const active=Object.entries(S.lockouts).filter(([,d])=>d>=tod());
+  // Build complete lockout map: S.lockouts + recent BUYS from S.trades
+  // This ensures the Do Not Rebuy list shows every locked ticker, even if computeWS hasn't run
+  const todayISO = tod();
+  const combinedLockouts = Object.assign({}, S.lockouts || {});
+  if (S.trades && S.trades.length) {
+    for (const t of S.trades) {
+      if (t.action !== "BUY") continue;
+      if (dbet(t.date, todayISO) > 30) continue;
+      const safeAfter = dadd(t.date, 31);
+      if (!combinedLockouts[t.ticker] || combinedLockouts[t.ticker] < safeAfter) {
+        combinedLockouts[t.ticker] = safeAfter;
+      }
+    }
+  }
+  const active = Object.entries(combinedLockouts).filter(([,d])=>d>=todayISO);
   if(active.length){
+    // Sort by soonest safe date first
+    active.sort((a,b) => a[1].localeCompare(b[1]));
     const lbl=document.createElement("div"); lbl.className="sec-lbl"; lbl.textContent="🔒 Do Not Rebuy These";
     lw.appendChild(lbl);
     for(const [ticker,date] of active){
@@ -3405,26 +3441,55 @@ function addManual(){
 }
 
 async function refreshAll(){
-  S.cfg = ld("cfg", S.cfg);  // Refresh config from localStorage
-  readSchwabEmails().catch(e => console.log("schwab email read:", e));
   const ic = document.getElementById("rico");
-  ic.style.animation = "spin .5s linear infinite";
-  
-  // Fetch live prices in parallel with brief
-  const tasks = [];
-  if (S.cfg.finnhubKey) tasks.push(fetchLivePrices());
-  
-  computeWS();
-  
-  // Wait for prices to update the dashboard
-  if (tasks.length) await Promise.all(tasks);
-  
-  renderDash();
-  renderTrades();
-  renderStats();
-  updateSchwabStatus();
-  // Don't auto-generate brief on refresh — user taps Generate button instead
-  ic.style.animation = "";
+  const btn = ic ? ic.parentElement : null;
+  try {
+    S.cfg = ld("cfg", S.cfg);  // Refresh config from localStorage
+    if (ic) ic.style.animation = "spin .5s linear infinite";
+    if (btn) btn.disabled = true;
+    
+    // Fire email parser in background (non-blocking)
+    readSchwabEmails().catch(e => console.warn("Schwab email read failed:", e));
+    
+    // Fetch live prices in parallel
+    const tasks = [];
+    if (S.cfg.finnhubKey) tasks.push(fetchLivePrices().catch(e => console.warn("Prices fetch failed:", e)));
+    
+    // Recompute wash sale conflicts and lockouts
+    try { computeWS(); } catch(e) { console.error("computeWS error:", e); }
+    
+    // Wait for prices
+    if (tasks.length) await Promise.all(tasks);
+    
+    // Re-render everything
+    try { renderDash(); } catch(e) { console.error("renderDash error:", e); }
+    try { renderTrades(); } catch(e) { console.error("renderTrades error:", e); }
+    try { renderStats(); } catch(e) { console.error("renderStats error:", e); }
+    try { updateSchwabStatus(); } catch(e) { console.error("updateSchwabStatus error:", e); }
+    
+    // Also re-render active tab if it's a data-driven one
+    try {
+      const activeTab = document.querySelector(".tab.active");
+      if (activeTab?.id === "tab-taxes" && typeof renderTaxes === "function") renderTaxes();
+    } catch(e) { console.error("re-render active tab error:", e); }
+    
+    // Visible feedback: flash confirmation toast
+    const toast = document.createElement("div");
+    toast.textContent = "✓ Refreshed — prices, lockouts, emails";
+    toast.style.cssText = "position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:rgba(5,150,105,.95);color:#fff;padding:10px 20px;border-radius:22px;font-size:13px;font-weight:700;z-index:9999;box-shadow:0 4px 14px rgba(0,0,0,.3);font-family:'DM Sans',sans-serif";
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 2200);
+  } catch(e) {
+    console.error("refreshAll fatal error:", e);
+    const toast = document.createElement("div");
+    toast.textContent = "✗ Refresh error — check console";
+    toast.style.cssText = "position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:rgba(220,38,38,.95);color:#fff;padding:10px 20px;border-radius:22px;font-size:13px;font-weight:700;z-index:9999;font-family:'DM Sans',sans-serif";
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 3000);
+  } finally {
+    if (ic) ic.style.animation = "";
+    if (btn) btn.disabled = false;
+  }
 }
 
 function saveCfg(){
