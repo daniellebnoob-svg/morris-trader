@@ -482,8 +482,12 @@ function checkGmailCallback() {
       const expiry = Date.now() + (parseInt(expiresIn) * 1000);
       sv('gmail_token', token);
       sv('gmail_expiry', expiry);
-      S.cfg.gmail = token;
-      sv('cfg', S.cfg);
+      // CRITICAL: Load existing cfg from localStorage BEFORE modifying it,
+      // otherwise we'd overwrite user's apiKey, finnhubKey, taxBracket, etc.
+      const existingCfg = ld('cfg', {}) || {};
+      existingCfg.gmail = token;
+      S.cfg = existingCfg;
+      sv('cfg', existingCfg);
       // Clean up URL
       window.history.replaceState(null, '', window.location.pathname);
       return token;
@@ -3443,10 +3447,22 @@ function addManual(){
 async function refreshAll(){
   const ic = document.getElementById("rico");
   const btn = ic ? ic.parentElement : null;
+  const originalLabel = btn ? btn.innerHTML : null;
+  const originalBg = btn ? btn.style.background : null;
+  const originalBorder = btn ? btn.style.borderColor : null;
   try {
+    // IMMEDIATE visual feedback so user sees the tap registered
+    if (btn) {
+      btn.innerHTML = '<span id="rico" style="display:inline-block;animation:spin .6s linear infinite">↻</span> Refreshing...';
+      btn.disabled = true;
+    }
     S.cfg = ld("cfg", S.cfg);  // Refresh config from localStorage
-    if (ic) ic.style.animation = "spin .5s linear infinite";
-    if (btn) btn.disabled = true;
+    
+    // If no API key, tell user they need to set up first
+    if (!S.cfg.apiKey) {
+      alert("⚠️ API key missing. Open Settings (gear icon) and re-enter your API key. Gmail OAuth may have cleared it.");
+      return;
+    }
     
     // Fire email parser in background (non-blocking)
     readSchwabEmails().catch(e => console.warn("Schwab email read failed:", e));
@@ -3473,22 +3489,42 @@ async function refreshAll(){
       if (activeTab?.id === "tab-taxes" && typeof renderTaxes === "function") renderTaxes();
     } catch(e) { console.error("re-render active tab error:", e); }
     
-    // Visible feedback: flash confirmation toast
-    const toast = document.createElement("div");
-    toast.textContent = "✓ Refreshed — prices, lockouts, emails";
-    toast.style.cssText = "position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:rgba(5,150,105,.95);color:#fff;padding:10px 20px;border-radius:22px;font-size:13px;font-weight:700;z-index:9999;box-shadow:0 4px 14px rgba(0,0,0,.3);font-family:'DM Sans',sans-serif";
-    document.body.appendChild(toast);
-    setTimeout(() => toast.remove(), 2200);
+    // Button turns green with checkmark for clear confirmation
+    if (btn) {
+      btn.innerHTML = '<span style="color:#fff;font-weight:800">✓ Refreshed</span>';
+      btn.style.background = "rgba(5,150,105,.85)";
+      btn.style.borderColor = "rgba(167,243,208,.5)";
+    }
+    // Revert after 2 seconds
+    setTimeout(() => {
+      if (btn) {
+        btn.innerHTML = originalLabel || '<span id="rico">↻</span> Refresh';
+        btn.style.background = originalBg || "";
+        btn.style.borderColor = originalBorder || "";
+        btn.disabled = false;
+      }
+    }, 2000);
+    return;  // Don't fall through to finally-reset-button
   } catch(e) {
     console.error("refreshAll fatal error:", e);
-    const toast = document.createElement("div");
-    toast.textContent = "✗ Refresh error — check console";
-    toast.style.cssText = "position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:rgba(220,38,38,.95);color:#fff;padding:10px 20px;border-radius:22px;font-size:13px;font-weight:700;z-index:9999;font-family:'DM Sans',sans-serif";
-    document.body.appendChild(toast);
-    setTimeout(() => toast.remove(), 3000);
+    if (btn) {
+      btn.innerHTML = '<span style="color:#fff;font-weight:800">✗ Error</span>';
+      btn.style.background = "rgba(220,38,38,.85)";
+      btn.style.borderColor = "rgba(252,165,165,.5)";
+    }
+    alert("Refresh error: " + (e.message || "unknown error. Check console for details."));
+    setTimeout(() => {
+      if (btn) {
+        btn.innerHTML = originalLabel || '<span id="rico">↻</span> Refresh';
+        btn.style.background = originalBg || "";
+        btn.style.borderColor = originalBorder || "";
+        btn.disabled = false;
+      }
+    }, 2500);
+    return;
   } finally {
-    if (ic) ic.style.animation = "";
-    if (btn) btn.disabled = false;
+    // Only re-enable here if we didn't hit the success/error path above
+    // (those set their own timeouts)
   }
 }
 
@@ -4631,7 +4667,7 @@ function renderOptimizer(wrap, d) {
 }
 
 // ── BOOT ───────────────────────────────────────────────────────────
-const APP_VERSION = "2.1-voice-fix-2026-04-18";
+const APP_VERSION = "2.2-oauth-fix-2026-04-22";
 
 window.addEventListener("load",()=>{
   console.log("Morris Trader", APP_VERSION);
