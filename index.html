@@ -794,6 +794,9 @@ Rules:
             for (const [ticker, close] of Object.entries(parsed.prices)) {
               const closeNum = Number(close);
               if (!isFinite(closeNum) || closeNum <= 0) continue;
+              const existing = closing[ticker.toUpperCase()];
+              // Only overwrite if this email is newer than what we already have
+              if (existing && existing.date && existing.date > closeDate) continue;
               closing[ticker.toUpperCase()] = {
                 price: closeNum,
                 date: closeDate,
@@ -3999,7 +4002,11 @@ function renderHoldings() {
           <div style="font-size:11px;font-weight:700;color:${uColor}">${unreal<0?'-':'+'}$${Math.abs(unreal).toFixed(0).toLocaleString()} (${unrealPct.toFixed(1)}%)</div>
         </div>
       </div>
-      <div style="font-size:10px;color:var(--muted);padding-top:6px;border-top:1px solid rgba(255,255,255,.06)">Live: $${live.toFixed(2)} · Cost basis: $${cost.toFixed(0).toLocaleString()}</div>
+      <div style="font-size:10px;color:var(--muted);padding-top:6px;border-top:1px solid rgba(255,255,255,.06)">Live: $${live.toFixed(2)} · Cost basis: $${cost.toFixed(0).toLocaleString()}${(function(){
+        const cp = S.closingPrices?.[t];
+        if (cp && cp.price && cp.date) return ` · Schwab close ${fmt(cp.date)}: $${cp.price.toFixed(2)}`;
+        return '';
+      })()}</div>
     </div>`;
   }
   
@@ -4044,14 +4051,19 @@ function renderHoldings() {
   }
   
   // Data Sources status footer — proves what's wired up
+  const closingDates = Object.values(S.closingPrices || {}).map(c => c.date).filter(Boolean).sort();
+  const lastClosingDate = closingDates.length > 0 ? closingDates[closingDates.length - 1] : null;
+  const ratingDates = Object.values(S.schwabRatings || {}).map(r => r.date).filter(Boolean).sort();
+  const lastRatingDate = ratingDates.length > 0 ? ratingDates[ratingDates.length - 1] : null;
+  
   html += `<div class="sec-lbl" style="margin-top:16px">🔌 Data Sources Status</div>
   <div style="background:var(--card);border:1px solid var(--border);border-radius:11px;padding:12px;font-size:11px;line-height:1.7;color:rgba(255,255,255,.85)">
     ${importedAt ? '✅' : '❌'} <b>Schwab Positions CSV</b> — ${importedAt ? `imported ${importStr}` : 'not imported. Settings → Schwab Import.'}<br>
     ${S.schwabRealized?.importedAt ? '✅' : '❌'} <b>Schwab Realized G/L Details CSV</b> — ${S.schwabRealized?.importedAt ? `imported ${new Date(S.schwabRealized.importedAt).toLocaleDateString()}` : 'not imported.'}<br>
     ${(S.schwabEmailUpdates || []).filter(u => u.action).length > 0 ? '✅' : '⏳'} <b>Trade execution emails</b> — ${(S.schwabEmailUpdates || []).filter(u => u.action).length} captured<br>
-    ${Object.keys(S.closingPrices || {}).length > 0 ? '✅' : '⏳'} <b>Closing summary emails</b> — ${Object.keys(S.closingPrices || {}).length} closing prices captured<br>
-    ${(S.schwabWeeklySnapshots || []).length > 0 ? '✅' : '⏳'} <b>Weekly summary emails</b> — ${(S.schwabWeeklySnapshots || []).length} weeks captured<br>
-    ${Object.keys(S.schwabRatings || {}).length > 0 ? '✅' : '⏳'} <b>Equity ratings emails</b> — ${Object.keys(S.schwabRatings || {}).length} tickers rated<br>
+    ${Object.keys(S.closingPrices || {}).length > 0 ? '✅' : '⏳'} <b>Daily Closing Summary emails</b> — ${Object.keys(S.closingPrices || {}).length} prices${lastClosingDate ? ` · most recent: ${fmt(lastClosingDate)}` : ''}<br>
+    ${(S.schwabWeeklySnapshots || []).length > 0 ? '✅' : '⏳'} <b>Weekly summary emails</b> — ${(S.schwabWeeklySnapshots || []).length} weeks captured (optional — daily already covers this)<br>
+    ${Object.keys(S.schwabRatings || {}).length > 0 ? '✅' : '⏳'} <b>Equity ratings emails</b> — ${Object.keys(S.schwabRatings || {}).length} tickers${lastRatingDate ? ` · ${fmt(lastRatingDate)}` : ''}<br>
     ${isGmailConnected() ? '✅' : '❌'} <b>Gmail connection</b> — ${isGmailConnected() ? 'connected, polling on Refresh' : 'not connected. Settings → Connect Gmail.'}
   </div>`;
   
@@ -5165,7 +5177,7 @@ function renderOptimizer(wrap, d) {
 }
 
 // ── BOOT ───────────────────────────────────────────────────────────
-const APP_VERSION = "2.3-weekly-ratings-2026-04-25";
+const APP_VERSION = "2.4-closing-visible-2026-04-25";
 
 window.addEventListener("load",()=>{
   console.log("Morris Trader", APP_VERSION);
