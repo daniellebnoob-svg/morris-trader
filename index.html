@@ -197,10 +197,13 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
 
   <div class="content">
     <div class="tab active" id="tab-dash">
-      <div class="portfolio-card" id="portfolio-card">
+      <div class="portfolio-card" id="portfolio-card" onclick="sw('holdings')" style="cursor:pointer" title="Tap to view full holdings">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
           <div class="sec-lbl" style="margin:0">Portfolio Live</div>
-          <div id="price-age" style="font-size:10px;color:var(--muted)"></div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <div id="price-age" style="font-size:10px;color:var(--muted)"></div>
+            <span style="font-size:10px;color:var(--gold2);font-weight:700">VIEW HOLDINGS →</span>
+          </div>
         </div>
         <div class="pg" id="port-stats">
           <div><div class="pgl">Market Value</div><div class="pgv" id="port-val">—</div></div>
@@ -224,6 +227,17 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
         <input type="file" id="import-from-dash" accept=".json" style="display:none" onchange="importTrades(event); sw(\'dash\')">
         </div>
       </div>
+    </div>
+
+    <div class="tab" id="tab-holdings">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div>
+          <div style="font-family:'Playfair Display',serif;font-size:22px;font-weight:800;color:var(--gold2)">📋 Your Holdings</div>
+          <div id="holdings-subtitle" style="font-size:11px;color:var(--muted);margin-top:2px">Source of truth — Schwab CSV + email updates</div>
+        </div>
+        <button onclick="sw('dash')" style="padding:7px 12px;background:rgba(26,79,214,.2);border:1px solid rgba(147,197,253,.3);color:#93c5fd;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif">← Back</button>
+      </div>
+      <div id="holdings-wrap"></div>
     </div>
 
     <div class="tab" id="tab-brief">
@@ -523,8 +537,8 @@ async function readSchwabEmails() {
     ? new Date(S.schwabRealized.importedAt).toISOString().split("T")[0].replace(/-/g, "/")
     : new Date(Date.now() - 30*86400000).toISOString().split("T")[0].replace(/-/g, "/");
   
-  // Search Gmail for Schwab trade confirmations since last import
-  const query = `from:schwab.com after:${sinceDate} subject:(trade OR confirmation OR executed OR order)`;
+  // Search Gmail for Schwab trade confirmations AND closing summaries
+  const query = `from:schwab.com after:${sinceDate} (subject:(trade OR confirmation OR executed OR order) OR subject:"closing summary")`;
   const listUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=50`;
   
   try {
@@ -566,11 +580,85 @@ async function readSchwabEmails() {
       const msgDate = dateHeader ? new Date(dateHeader).toISOString().split("T")[0] : "";
       
       // Strip HTML and limit to 3000 chars for AI parsing
-      const cleanText = bodyText.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 3000);
+      const cleanText = bodyText.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 8000);
       
       if (cleanText.length < 50) continue;
       
-      // Ask Claude to extract trade details
+      // Route based on subject
+      const isClosingSummary = /closing summary/i.test(subject);
+      
+      if (isClosingSummary) {
+        // Parse closing prices — this is a daily market recap email
+        try {
+          const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-api-key": S.cfg.apiKey,
+              "anthropic-version": "2023-06-01",
+              "anthropic-dangerous-direct-browser-access": "true"
+            },
+            body: JSON.stringify({
+              model: "claude-opus-4-7",
+              max_tokens: 4000,
+              system: "You extract closing price data from Schwab 'My Closing Summary' daily market recap emails. Return ONLY valid JSON with no markdown.",
+              messages: [{role: "user", content: 
+                `Extract closing prices from this Schwab daily summary email. The email has a table with columns: Symbol, Security, Close, Change, Daily High, Daily Low, Volume, Percent Change.
+
+Email subject: "${subject}"
+Email date header: ${msgDate}
+
+Email body:
+${cleanText}
+
+Return JSON: {"date":"YYYY-MM-DD","prices":{"TICKER":closeValue,"TICKER2":closeValue2,...}}
+
+Rules:
+- date: the "Apr 22, 2026" date at the top of the summary, in YYYY-MM-DD format
+- prices: map each ticker to its closing price (the "Close" column, as a number)
+- Extract ALL tickers in the table. This is authoritative closing-price data from Schwab.
+- Only include Equities & Mutual Funds. Skip indices (Dow Jones, NASDAQ, etc).`
+              }]
+            })
+          });
+          const aiData = await aiRes.json();
+          const text = aiData.content?.[0]?.text || "{}";
+          const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+          
+          if (parsed.prices && typeof parsed.prices === "object") {
+            const closeDate = parsed.date || msgDate;
+            const closing = S.closingPrices || {};
+            let priceCount = 0;
+            for (const [ticker, close] of Object.entries(parsed.prices)) {
+              const closeNum = Number(close);
+              if (!isFinite(closeNum) || closeNum <= 0) continue;
+              closing[ticker.toUpperCase()] = {
+                price: closeNum,
+                date: closeDate,
+                source: "schwab-closing-email",
+                updated: new Date().toISOString()
+              };
+              priceCount++;
+            }
+            S.closingPrices = closing;
+            sv("closingPrices", closing);
+            // Track this message as processed (use "closing-" prefix to distinguish)
+            updates.push({
+              messageId: m.id,
+              type: "closing-summary",
+              date: closeDate,
+              priceCount: priceCount,
+              parsedAt: new Date().toISOString()
+            });
+            console.log(`Parsed ${priceCount} closing prices from Schwab summary (${closeDate})`);
+          }
+        } catch (err) {
+          console.warn(`Closing summary parse failed for ${m.id}:`, err.message || err);
+        }
+        continue;  // Don't fall through to trade parser
+      }
+      
+      // Ask Claude to extract trade details (default path — trade execution email)
       try {
         const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
           method: "POST",
@@ -662,36 +750,55 @@ Rules:
 // ══════════════════════════════════════════════════════════════════
 // LIVE PRICES — Finnhub API
 // ══════════════════════════════════════════════════════════════════
-async function fetchLivePrices() {
+async function fetchLivePrices(onProgress) {
   if (!S.cfg.finnhubKey) return;
   const pos = buildPos();
   const tickers = Object.keys(pos).filter(t => pos[t].shares > 0);
   if (!tickers.length) return;
   
-  // Fetch in batches to respect 60/min rate limit
-  const prices = {};
   const now = Date.now();
   
-  // Only fetch if prices are older than 10 minutes (cache to avoid rate limits)
-  if (S.pricesUpdated && (now - S.pricesUpdated) < 600000) {
+  // Cache: skip if prices are less than 5 minutes old
+  if (S.pricesUpdated && (now - S.pricesUpdated) < 300000 && Object.keys(S.prices || {}).length > 0) {
+    console.log("Using cached prices (less than 5 min old)");
     return S.prices;
   }
   
-  // Prioritize biggest positions first (by value) so if we hit rate limit, key positions are covered
+  // Prioritize biggest positions first (by value)
   const tickersSorted = tickers.sort((a, b) => {
     const valA = (pos[a].shares || 0) * (pos[a].avg || 0);
     const valB = (pos[b].shares || 0) * (pos[b].avg || 0);
     return valB - valA;
   });
   
-  // Respect 60/min rate limit — space requests at 1.1 seconds apart
-  for (let i = 0; i < tickersSorted.length; i++) {
-    const ticker = tickersSorted[i];
+  // CAP at top 30 by value — refresh completes in ~35s max, not 90s
+  const toFetch = tickersSorted.slice(0, 30);
+  const prices = Object.assign({}, S.prices || {});  // Preserve existing prices for uncapped tickers
+  
+  // Helper: fetch with 5-second timeout
+  async function fetchWithTimeout(url, ms) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), ms);
     try {
-      const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${ticker}&token=${S.cfg.finnhubKey}`);
+      const res = await fetch(url, { signal: ctrl.signal });
+      clearTimeout(t);
+      return res;
+    } catch(e) {
+      clearTimeout(t);
+      throw e;
+    }
+  }
+  
+  for (let i = 0; i < toFetch.length; i++) {
+    const ticker = toFetch[i];
+    if (onProgress) onProgress(i, toFetch.length);
+    try {
+      const res = await fetchWithTimeout(
+        `https://finnhub.io/api/v1/quote?symbol=${ticker}&token=${S.cfg.finnhubKey}`,
+        5000
+      );
       if (res.status === 429) {
-        // Rate limited — stop and use what we have
-        console.log(`Finnhub rate limited at ${i}/${tickersSorted.length}, using cached prices for rest`);
+        console.log(`Finnhub rate limited at ${i}/${toFetch.length}`);
         break;
       }
       const data = await res.json();
@@ -707,15 +814,17 @@ async function fetchLivePrices() {
           updated: now
         };
       }
-      // Throttle: 1.1 second delay between every call (keeps us under 60/min safely)
-      if (i < tickersSorted.length - 1) {
+      // Throttle: 1.1 second delay between calls (under 60/min)
+      if (i < toFetch.length - 1) {
         await new Promise(r => setTimeout(r, 1100));
       }
     } catch(e) {
-      console.log(`Price fetch failed for ${ticker}:`, e);
+      console.warn(`Price fetch failed for ${ticker}:`, e.message || e);
+      // Continue to next ticker, don't break the whole loop
     }
   }
   
+  if (onProgress) onProgress(toFetch.length, toFetch.length);
   S.prices = prices;
   S.pricesUpdated = now;
   sv("prices", prices);
@@ -1486,6 +1595,74 @@ function buildPos(){
   const r={};
   for(const [t,v] of Object.entries(pos)) if(v.shares>0) r[t]={shares:v.shares,avg:v.cost/v.shares,source:"derived"};
   return r;
+}
+
+// Adjusted positions: Schwab CSV + any email-parsed trades since last CSV import.
+// This gives the most current view of holdings between weekly CSV imports.
+// Returns: { ticker: {shares, avg, costBasisTotal, source, baselineShares, emailAdjustment} }
+function getAdjustedPositions() {
+  const result = {};
+  const importedAt = S.schwabPositions?.importedAt;
+  
+  // Start with baseline Schwab positions
+  if (S.schwabPositions?.positions) {
+    for (const p of S.schwabPositions.positions) {
+      result[p.ticker] = {
+        shares: p.shares,
+        avg: p.costBasisPerShare,
+        costBasisTotal: p.costBasisTotal,
+        currentPrice: p.currentPrice,
+        source: "schwab-csv",
+        baselineShares: p.shares,
+        emailAdjustment: 0
+      };
+    }
+  }
+  
+  // Apply email trade updates that happened AFTER the Positions CSV was imported
+  if (S.schwabEmailUpdates && S.schwabEmailUpdates.length > 0 && importedAt) {
+    for (const u of S.schwabEmailUpdates) {
+      // Only apply trades that happened after the CSV snapshot
+      if (u.date < importedAt.split("T")[0]) continue;
+      if (!u.ticker || !u.action || !u.shares) continue;
+      
+      const sign = u.action === "BUY" ? 1 : -1;
+      const delta = sign * Number(u.shares);
+      
+      if (!result[u.ticker]) {
+        // Ticker wasn't in baseline CSV — email shows a new position
+        if (delta > 0) {
+          result[u.ticker] = {
+            shares: delta,
+            avg: Number(u.price) || 0,
+            costBasisTotal: delta * (Number(u.price) || 0),
+            source: "email-only",
+            baselineShares: 0,
+            emailAdjustment: delta
+          };
+        }
+      } else {
+        result[u.ticker].shares += delta;
+        result[u.ticker].emailAdjustment += delta;
+        result[u.ticker].source = "schwab-csv+email";
+        // Recompute cost basis on buys (weighted average); sells reduce shares but keep avg cost
+        if (u.action === "BUY") {
+          const newCost = result[u.ticker].costBasisTotal + (delta * (Number(u.price) || 0));
+          result[u.ticker].costBasisTotal = newCost;
+          if (result[u.ticker].shares > 0) {
+            result[u.ticker].avg = newCost / result[u.ticker].shares;
+          }
+        }
+      }
+      
+      // Drop if shares went to zero or below (fully sold)
+      if (result[u.ticker] && result[u.ticker].shares <= 0) {
+        delete result[u.ticker];
+      }
+    }
+  }
+  
+  return result;
 }
 
 // ── RENDER ─────────────────────────────────────────────────────────
@@ -2369,12 +2546,16 @@ function autofillWorthIt() {
   const sharesField = document.getElementById("w-shares");
   if (!ticker) return;
   
-  // Auto-fill with current holding amount if in Schwab positions
-  if (S.schwabPositions?.positions) {
-    const pos = S.schwabPositions.positions.find(p => p.ticker === ticker);
-    if (pos) {
-      sharesField.placeholder = `You hold ${pos.shares}`;
+  // Use ADJUSTED positions (CSV + email updates) — most current view
+  const adjusted = getAdjustedPositions();
+  const p = adjusted[ticker];
+  if (p) {
+    let label = `You hold ${p.shares}`;
+    if (p.emailAdjustment && p.emailAdjustment !== 0) {
+      const sign = p.emailAdjustment > 0 ? "+" : "";
+      label += ` (CSV: ${p.baselineShares}, email: ${sign}${p.emailAdjustment})`;
     }
+    sharesField.placeholder = label;
   }
 }
 
@@ -3467,9 +3648,14 @@ async function refreshAll(){
     // Fire email parser in background (non-blocking)
     readSchwabEmails().catch(e => console.warn("Schwab email read failed:", e));
     
-    // Fetch live prices in parallel
+    // Fetch live prices with progress updates
     const tasks = [];
-    if (S.cfg.finnhubKey) tasks.push(fetchLivePrices().catch(e => console.warn("Prices fetch failed:", e)));
+    if (S.cfg.finnhubKey) {
+      const progressFn = (done, total) => {
+        if (btn) btn.innerHTML = `<span id="rico" style="display:inline-block;animation:spin .6s linear infinite">↻</span> Refreshing ${done}/${total}`;
+      };
+      tasks.push(fetchLivePrices(progressFn).catch(e => console.warn("Prices fetch failed:", e)));
+    }
     
     // Recompute wash sale conflicts and lockouts
     try { computeWS(); } catch(e) { console.error("computeWS error:", e); }
@@ -3556,8 +3742,115 @@ function sw(tab){
   if (navEl) navEl.classList.add("active");
   // Trigger render on tab open
   if (tab === "taxes" && typeof renderTaxes === "function") renderTaxes();
+  if (tab === "holdings" && typeof renderHoldings === "function") renderHoldings();
   // Scroll to top on tab change
   window.scrollTo(0,0);
+}
+
+// Holdings tab: the "source of truth" view showing what the app thinks you own
+function renderHoldings() {
+  const wrap = document.getElementById("holdings-wrap");
+  const sub = document.getElementById("holdings-subtitle");
+  if (!wrap) return;
+  
+  const adjusted = getAdjustedPositions();
+  const tickers = Object.keys(adjusted).sort();
+  
+  if (tickers.length === 0) {
+    wrap.innerHTML = `<div class="empty"><div class="ei">📥</div>No positions loaded. Import the Schwab Positions CSV in Settings (gear icon).</div>`;
+    sub.textContent = "No Schwab CSV imported yet";
+    return;
+  }
+  
+  // Subtitle: import date + email adjustments count
+  const importedAt = S.schwabPositions?.importedAt;
+  const importStr = importedAt ? new Date(importedAt).toLocaleDateString("en-US", {month:"short",day:"numeric",year:"numeric"}) : "unknown";
+  const emailCount = (S.schwabEmailUpdates || []).filter(u => importedAt && u.date >= importedAt.split("T")[0]).length;
+  sub.innerHTML = `CSV imported ${importStr} · ${emailCount} trade${emailCount!==1?'s':''} since via email`;
+  
+  // Compute totals
+  let totalMktVal = 0, totalCost = 0;
+  for (const t of tickers) {
+    const p = adjusted[t];
+    const live = S.prices?.[t]?.current || p.currentPrice || p.avg;
+    totalMktVal += p.shares * live;
+    totalCost += p.costBasisTotal || (p.shares * p.avg);
+  }
+  const totalUnreal = totalMktVal - totalCost;
+  const unrealColor = totalUnreal >= 0 ? 'var(--green2)' : 'var(--red2)';
+  
+  let html = `<div style="background:linear-gradient(135deg,rgba(26,79,214,.12),rgba(8,145,178,.08));border:1px solid rgba(26,79,214,.25);border-radius:13px;padding:13px 15px;margin-bottom:10px">
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+      <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.04em">Positions</div><div style="font-family:'Playfair Display',serif;font-size:20px;font-weight:800;color:#fff">${tickers.length}</div></div>
+      <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.04em">Market Value</div><div style="font-family:'Playfair Display',serif;font-size:20px;font-weight:800;color:#fff">$${(totalMktVal/1e6).toFixed(2)}M</div></div>
+      <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.04em">Unrealized</div><div style="font-family:'Playfair Display',serif;font-size:20px;font-weight:800;color:${unrealColor}">${totalUnreal<0?'-':'+'}$${Math.abs(totalUnreal/1000).toFixed(0)}K</div></div>
+    </div>
+  </div>`;
+  
+  html += `<div class="sec-lbl">All Positions (${tickers.length})</div>`;
+  
+  // Sort by market value descending
+  tickers.sort((a,b) => {
+    const liveA = S.prices?.[a]?.current || adjusted[a].currentPrice || adjusted[a].avg;
+    const liveB = S.prices?.[b]?.current || adjusted[b].currentPrice || adjusted[b].avg;
+    return (adjusted[b].shares * liveB) - (adjusted[a].shares * liveA);
+  });
+  
+  for (const t of tickers) {
+    const p = adjusted[t];
+    const live = S.prices?.[t]?.current || p.currentPrice || p.avg;
+    const mktVal = p.shares * live;
+    const cost = p.costBasisTotal || (p.shares * p.avg);
+    const unreal = mktVal - cost;
+    const unrealPct = cost > 0 ? (unreal / cost) * 100 : 0;
+    const uColor = unreal >= 0 ? 'var(--green2)' : 'var(--red2)';
+    
+    // Source badge
+    let sourceBadge = "";
+    if (p.source === "schwab-csv+email") {
+      const sign = p.emailAdjustment > 0 ? "+" : "";
+      sourceBadge = `<span style="font-size:9px;color:var(--warn2);background:rgba(217,119,6,.15);padding:2px 7px;border-radius:9px;font-weight:700;margin-left:6px">CSV ${p.baselineShares} ${sign}${p.emailAdjustment} email</span>`;
+    } else if (p.source === "email-only") {
+      sourceBadge = `<span style="font-size:9px;color:var(--gold2);background:rgba(212,160,23,.15);padding:2px 7px;border-radius:9px;font-weight:700;margin-left:6px">EMAIL ONLY</span>`;
+    }
+    
+    html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:11px;padding:11px 13px;margin-bottom:6px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+        <div>
+          <div style="font-family:'Playfair Display',serif;font-size:17px;font-weight:800;color:var(--gold2);display:flex;align-items:center;flex-wrap:wrap">${t}${sourceBadge}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">${p.shares.toLocaleString()} shares @ $${p.avg.toFixed(2)} avg</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:14px;font-weight:800;color:#fff">$${mktVal.toFixed(0).toLocaleString()}</div>
+          <div style="font-size:11px;font-weight:700;color:${uColor}">${unreal<0?'-':'+'}$${Math.abs(unreal).toFixed(0).toLocaleString()} (${unrealPct.toFixed(1)}%)</div>
+        </div>
+      </div>
+      <div style="font-size:10px;color:var(--muted);padding-top:6px;border-top:1px solid rgba(255,255,255,.06)">Live: $${live.toFixed(2)} · Cost basis: $${cost.toFixed(0).toLocaleString()}</div>
+    </div>`;
+  }
+  
+  // If there are email updates, show them
+  const recentEmails = (S.schwabEmailUpdates || []).filter(u => importedAt && u.date >= importedAt.split("T")[0]);
+  if (recentEmails.length > 0) {
+    html += `<div class="sec-lbl" style="margin-top:16px">📧 Trades Detected From Emails (since CSV)</div>`;
+    for (const u of recentEmails.slice().reverse()) {
+      const actionColor = u.action === "BUY" ? "var(--green2)" : "var(--red2)";
+      const actionBg = u.action === "BUY" ? "rgba(5,150,105,.1)" : "rgba(220,38,38,.1)";
+      html += `<div style="background:${actionBg};border:1px solid var(--border);border-radius:10px;padding:10px 13px;margin-bottom:5px;font-size:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div><b style="color:${actionColor}">${u.action}</b> <b style="color:var(--gold2)">${u.ticker}</b> · ${u.shares} sh @ $${Number(u.price||0).toFixed(2)}</div>
+          <div style="color:var(--muted);font-size:11px">${fmt(u.date)}</div>
+        </div>
+      </div>`;
+    }
+  } else if (importedAt) {
+    html += `<div style="background:var(--card);border:1px dashed var(--border);border-radius:10px;padding:12px;margin-top:12px;font-size:11px;color:var(--muted);line-height:1.5">
+      📧 <b>No trades detected via email since ${importStr}.</b><br>
+      The app reads your Gmail for Schwab "trade was executed" emails and adjusts positions automatically. If you traded since your last import, re-import the Positions CSV for the most accurate view.
+    </div>`;
+  }
+  
+  wrap.innerHTML = html;
 }
 
 
