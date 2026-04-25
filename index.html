@@ -537,8 +537,8 @@ async function readSchwabEmails() {
     ? new Date(S.schwabRealized.importedAt).toISOString().split("T")[0].replace(/-/g, "/")
     : new Date(Date.now() - 30*86400000).toISOString().split("T")[0].replace(/-/g, "/");
   
-  // Search Gmail for Schwab trade confirmations AND closing summaries
-  const query = `from:schwab.com after:${sinceDate} (subject:(trade OR confirmation OR executed OR order) OR subject:"closing summary")`;
+  // Search Gmail for Schwab trade confirmations, closing summaries, weekly summaries, and equity ratings
+  const query = `from:schwab.com after:${sinceDate} (subject:(trade OR confirmation OR executed OR order) OR subject:"closing summary" OR subject:"weekly summary" OR subject:"equity ratings")`;
   const listUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=50`;
   
   try {
@@ -586,6 +586,168 @@ async function readSchwabEmails() {
       
       // Route based on subject
       const isClosingSummary = /closing summary/i.test(subject);
+      const isWeeklySummary = /weekly summary/i.test(subject);
+      const isEquityRatings = /equity ratings/i.test(subject);
+      
+      if (isWeeklySummary) {
+        // Parse weekly portfolio summary — captures all trades + balance changes for the week
+        try {
+          const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-api-key": S.cfg.apiKey,
+              "anthropic-version": "2023-06-01",
+              "anthropic-dangerous-direct-browser-access": "true"
+            },
+            body: JSON.stringify({
+              model: "claude-opus-4-7",
+              max_tokens: 4000,
+              system: "You extract trade and balance data from Schwab 'My Weekly Summary' emails. Return ONLY valid JSON with no markdown.",
+              messages: [{role: "user", content: 
+                `Extract trades and balance information from this Schwab weekly summary email.
+
+Email subject: "${subject}"
+Email date: ${msgDate}
+
+Email body:
+${cleanText}
+
+Look for:
+- Trade lists (buys/sells made during the week, with date, ticker, action, shares, price)
+- Beginning and ending account balance for the week
+- Dividends/interest received
+- Week date range
+
+Return JSON: {"weekStart":"YYYY-MM-DD","weekEnd":"YYYY-MM-DD","beginBalance":N,"endBalance":N,"dividends":N,"trades":[{"ticker":"X","action":"BUY","shares":N,"price":N,"date":"YYYY-MM-DD"}]}
+
+Rules:
+- action: "BUY" or "SELL" (uppercase)
+- price is the actual execution price from Schwab
+- Skip cash/sweep/money-market entries  
+- If a section is not present, omit it (but always include weekStart and weekEnd if visible)
+- Return {"trades":[]} if no trade data is in the email`
+              }]
+            })
+          });
+          const aiData = await aiRes.json();
+          const text = aiData.content?.[0]?.text || "{}";
+          const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+          
+          let tradeCount = 0;
+          if (parsed.trades?.length > 0) {
+            // Build set of already-known trade signatures to avoid duplicates
+            const seen = new Set((S.schwabEmailUpdates || []).map(u => `${u.ticker}|${u.action}|${u.shares}|${u.date}|${u.price}`));
+            for (const t of parsed.trades) {
+              if (!t.ticker || !t.action || !t.shares || !t.price || !t.date) continue;
+              const sig = `${t.ticker.toUpperCase()}|${t.action.toUpperCase()}|${Number(t.shares)}|${t.date}|${Number(t.price)}`;
+              if (seen.has(sig)) continue;
+              updates.push({
+                messageId: m.id + "-" + tradeCount,
+                ticker: t.ticker.toUpperCase(),
+                action: t.action.toUpperCase(),
+                shares: Number(t.shares),
+                price: Number(t.price),
+                proceeds: Number(t.shares) * Number(t.price),
+                date: t.date,
+                parsedAt: new Date().toISOString(),
+                source: "schwab-weekly-summary",
+                emailSubject: subject
+              });
+              seen.add(sig);
+              tradeCount++;
+            }
+          }
+          // Store the weekly snapshot
+          if (!S.schwabWeeklySnapshots) S.schwabWeeklySnapshots = [];
+          if (parsed.weekStart && parsed.weekEnd) {
+            // Replace any existing snapshot for the same week
+            S.schwabWeeklySnapshots = S.schwabWeeklySnapshots.filter(s => s.weekStart !== parsed.weekStart);
+            S.schwabWeeklySnapshots.push({
+              messageId: m.id,
+              weekStart: parsed.weekStart,
+              weekEnd: parsed.weekEnd,
+              beginBalance: Number(parsed.beginBalance) || null,
+              endBalance: Number(parsed.endBalance) || null,
+              dividends: Number(parsed.dividends) || 0,
+              tradeCount: tradeCount,
+              parsedAt: new Date().toISOString()
+            });
+            sv("schwabWeeklySnapshots", S.schwabWeeklySnapshots);
+          }
+          console.log(`Parsed weekly summary: ${tradeCount} trades, week ${parsed.weekStart}-${parsed.weekEnd}`);
+        } catch (err) {
+          console.warn(`Weekly summary parse failed for ${m.id}:`, err.message || err);
+        }
+        continue;
+      }
+      
+      if (isEquityRatings) {
+        // Parse Schwab Equity Ratings — A/B/C/D/F per ticker
+        try {
+          const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-api-key": S.cfg.apiKey,
+              "anthropic-version": "2023-06-01",
+              "anthropic-dangerous-direct-browser-access": "true"
+            },
+            body: JSON.stringify({
+              model: "claude-opus-4-7",
+              max_tokens: 3000,
+              system: "You extract Schwab Equity Ratings (A/B/C/D/F letter grades) from email reports. Return ONLY valid JSON with no markdown.",
+              messages: [{role: "user", content: 
+                `Extract Schwab Equity Ratings from this email. Each holding gets a letter grade A through F representing Schwab's outlook.
+
+Email subject: "${subject}"
+Email date: ${msgDate}
+
+Email body:
+${cleanText}
+
+Return JSON: {"date":"YYYY-MM-DD","ratings":{"TICKER":"A","TICKER2":"B+",...}}
+
+Rules:
+- Use the email date for "date"
+- ratings: map each ticker to its letter grade exactly as shown (A, A-, B+, B, B-, C+, C, C-, D, F)
+- Only include tickers that have an explicit letter grade
+- Return {"ratings":{}} if no ratings found`
+              }]
+            })
+          });
+          const aiData = await aiRes.json();
+          const text = aiData.content?.[0]?.text || "{}";
+          const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+          
+          if (parsed.ratings && typeof parsed.ratings === "object") {
+            const ratings = S.schwabRatings || {};
+            let ratingCount = 0;
+            for (const [ticker, grade] of Object.entries(parsed.ratings)) {
+              if (!grade || typeof grade !== "string") continue;
+              ratings[ticker.toUpperCase()] = {
+                grade: grade.trim(),
+                date: parsed.date || msgDate,
+                updated: new Date().toISOString()
+              };
+              ratingCount++;
+            }
+            S.schwabRatings = ratings;
+            sv("schwabRatings", ratings);
+            updates.push({
+              messageId: m.id,
+              type: "equity-ratings",
+              date: parsed.date || msgDate,
+              ratingCount: ratingCount,
+              parsedAt: new Date().toISOString()
+            });
+            console.log(`Parsed ${ratingCount} Schwab equity ratings`);
+          }
+        } catch (err) {
+          console.warn(`Equity ratings parse failed for ${m.id}:`, err.message || err);
+        }
+        continue;
+      }
       
       if (isClosingSummary) {
         // Parse closing prices — this is a daily market recap email
@@ -1135,6 +1297,8 @@ async function init(){
   S.brief        = ld("brief",null);
   S.briefDate    = ld("briefDate",null);
   S.closingPrices = ld("closingPrices",{});
+  S.schwabRatings = ld("schwabRatings", {});
+  S.schwabWeeklySnapshots = ld("schwabWeeklySnapshots", []);
   S.prices        = ld("prices",{});
   S.pricesUpdated = ld("pricesUpdated",null);
   S.patterns      = ld("patterns",null);
@@ -3814,10 +3978,20 @@ function renderHoldings() {
       sourceBadge = `<span style="font-size:9px;color:var(--gold2);background:rgba(212,160,23,.15);padding:2px 7px;border-radius:9px;font-weight:700;margin-left:6px">EMAIL ONLY</span>`;
     }
     
+    // Schwab equity rating badge
+    let ratingBadge = "";
+    const rating = S.schwabRatings?.[t];
+    if (rating?.grade) {
+      const g = rating.grade.charAt(0);
+      const ratingColor = g === "A" ? "var(--green2)" : g === "B" ? "#93c5fd" : g === "C" ? "var(--warn2)" : "var(--red2)";
+      const ratingBg = g === "A" ? "rgba(5,150,105,.18)" : g === "B" ? "rgba(26,79,214,.18)" : g === "C" ? "rgba(217,119,6,.18)" : "rgba(220,38,38,.18)";
+      ratingBadge = `<span style="font-size:10px;color:${ratingColor};background:${ratingBg};padding:2px 8px;border-radius:9px;font-weight:800;margin-left:6px;letter-spacing:.05em" title="Schwab Equity Rating">${rating.grade}</span>`;
+    }
+    
     html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:11px;padding:11px 13px;margin-bottom:6px">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
         <div>
-          <div style="font-family:'Playfair Display',serif;font-size:17px;font-weight:800;color:var(--gold2);display:flex;align-items:center;flex-wrap:wrap">${t}${sourceBadge}</div>
+          <div style="font-family:'Playfair Display',serif;font-size:17px;font-weight:800;color:var(--gold2);display:flex;align-items:center;flex-wrap:wrap">${t}${ratingBadge}${sourceBadge}</div>
           <div style="font-size:11px;color:var(--muted);margin-top:2px">${p.shares.toLocaleString()} shares @ $${p.avg.toFixed(2)} avg</div>
         </div>
         <div style="text-align:right">
@@ -3836,9 +4010,10 @@ function renderHoldings() {
     for (const u of recentEmails.slice().reverse()) {
       const actionColor = u.action === "BUY" ? "var(--green2)" : "var(--red2)";
       const actionBg = u.action === "BUY" ? "rgba(5,150,105,.1)" : "rgba(220,38,38,.1)";
+      const sourceTag = u.source === "schwab-weekly-summary" ? '<span style="font-size:9px;color:var(--muted);margin-left:6px">via Weekly Summary</span>' : '';
       html += `<div style="background:${actionBg};border:1px solid var(--border);border-radius:10px;padding:10px 13px;margin-bottom:5px;font-size:12px">
         <div style="display:flex;justify-content:space-between;align-items:center">
-          <div><b style="color:${actionColor}">${u.action}</b> <b style="color:var(--gold2)">${u.ticker}</b> · ${u.shares} sh @ $${Number(u.price||0).toFixed(2)}</div>
+          <div><b style="color:${actionColor}">${u.action}</b> <b style="color:var(--gold2)">${u.ticker}</b> · ${u.shares} sh @ $${Number(u.price||0).toFixed(2)}${sourceTag}</div>
           <div style="color:var(--muted);font-size:11px">${fmt(u.date)}</div>
         </div>
       </div>`;
@@ -3846,9 +4021,39 @@ function renderHoldings() {
   } else if (importedAt) {
     html += `<div style="background:var(--card);border:1px dashed var(--border);border-radius:10px;padding:12px;margin-top:12px;font-size:11px;color:var(--muted);line-height:1.5">
       📧 <b>No trades detected via email since ${importStr}.</b><br>
-      The app reads your Gmail for Schwab "trade was executed" emails and adjusts positions automatically. If you traded since your last import, re-import the Positions CSV for the most accurate view.
+      The app reads your Gmail for Schwab trade emails and weekly summaries to adjust positions automatically. If you traded since your last import, re-import the Positions CSV for the most accurate view.
     </div>`;
   }
+  
+  // Weekly Snapshots section — proves the weekly summary parser is working
+  if (S.schwabWeeklySnapshots && S.schwabWeeklySnapshots.length > 0) {
+    html += `<div class="sec-lbl" style="margin-top:16px">📅 Weekly Snapshots Captured</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:8px">From Schwab "My Weekly Summary" emails. Each entry confirms a week's trade data has been auto-captured.</div>`;
+    const sortedSnapshots = S.schwabWeeklySnapshots.slice().sort((a,b) => b.weekStart.localeCompare(a.weekStart));
+    for (const s of sortedSnapshots.slice(0, 8)) {
+      const balDelta = (s.endBalance && s.beginBalance) ? s.endBalance - s.beginBalance : null;
+      const balColor = balDelta === null ? 'var(--muted)' : balDelta >= 0 ? 'var(--green2)' : 'var(--red2)';
+      const balStr = balDelta === null ? '' : `${balDelta>=0?'+':'-'}$${Math.abs(balDelta).toFixed(0).toLocaleString()}`;
+      html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 13px;margin-bottom:5px;font-size:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div><b>${fmt(s.weekStart)} → ${fmt(s.weekEnd)}</b> · ${s.tradeCount} trade${s.tradeCount!==1?'s':''}${s.dividends?` · $${s.dividends.toFixed(0)} div`:''}</div>
+          <div style="color:${balColor};font-weight:700">${balStr}</div>
+        </div>
+      </div>`;
+    }
+  }
+  
+  // Data Sources status footer — proves what's wired up
+  html += `<div class="sec-lbl" style="margin-top:16px">🔌 Data Sources Status</div>
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:11px;padding:12px;font-size:11px;line-height:1.7;color:rgba(255,255,255,.85)">
+    ${importedAt ? '✅' : '❌'} <b>Schwab Positions CSV</b> — ${importedAt ? `imported ${importStr}` : 'not imported. Settings → Schwab Import.'}<br>
+    ${S.schwabRealized?.importedAt ? '✅' : '❌'} <b>Schwab Realized G/L Details CSV</b> — ${S.schwabRealized?.importedAt ? `imported ${new Date(S.schwabRealized.importedAt).toLocaleDateString()}` : 'not imported.'}<br>
+    ${(S.schwabEmailUpdates || []).filter(u => u.action).length > 0 ? '✅' : '⏳'} <b>Trade execution emails</b> — ${(S.schwabEmailUpdates || []).filter(u => u.action).length} captured<br>
+    ${Object.keys(S.closingPrices || {}).length > 0 ? '✅' : '⏳'} <b>Closing summary emails</b> — ${Object.keys(S.closingPrices || {}).length} closing prices captured<br>
+    ${(S.schwabWeeklySnapshots || []).length > 0 ? '✅' : '⏳'} <b>Weekly summary emails</b> — ${(S.schwabWeeklySnapshots || []).length} weeks captured<br>
+    ${Object.keys(S.schwabRatings || {}).length > 0 ? '✅' : '⏳'} <b>Equity ratings emails</b> — ${Object.keys(S.schwabRatings || {}).length} tickers rated<br>
+    ${isGmailConnected() ? '✅' : '❌'} <b>Gmail connection</b> — ${isGmailConnected() ? 'connected, polling on Refresh' : 'not connected. Settings → Connect Gmail.'}
+  </div>`;
   
   wrap.innerHTML = html;
 }
@@ -4960,7 +5165,7 @@ function renderOptimizer(wrap, d) {
 }
 
 // ── BOOT ───────────────────────────────────────────────────────────
-const APP_VERSION = "2.2-oauth-fix-2026-04-22";
+const APP_VERSION = "2.3-weekly-ratings-2026-04-25";
 
 window.addEventListener("load",()=>{
   console.log("Morris Trader", APP_VERSION);
