@@ -532,25 +532,55 @@ async function readSchwabEmails() {
   if (!token) return;
   if (!S.cfg.apiKey) return;
   
-  // Only read emails newer than the last CSV import
-  const sinceDate = S.schwabRealized?.importedAt 
-    ? new Date(S.schwabRealized.importedAt).toISOString().split("T")[0].replace(/-/g, "/")
-    : new Date(Date.now() - 30*86400000).toISOString().split("T")[0].replace(/-/g, "/");
+  // Look back at least 14 days, OR since the LAST email-update poll (whichever is older)
+  // Use the day BEFORE last import to avoid Gmail's exclusive after: behavior
+  let lookbackDate;
+  if (S.schwabRealized?.importedAt) {
+    const importedDate = new Date(S.schwabRealized.importedAt);
+    importedDate.setDate(importedDate.getDate() - 1); // back up by 1 day to be safe
+    lookbackDate = importedDate;
+  } else {
+    lookbackDate = new Date(Date.now() - 30 * 86400000);
+  }
+  // Cap to at least 14 days back so closing summaries always get caught
+  const minLookback = new Date(Date.now() - 14 * 86400000);
+  if (lookbackDate > minLookback) lookbackDate = minLookback;
+  const sinceDate = lookbackDate.toISOString().split("T")[0].replace(/-/g, "/");
   
-  // Search Gmail for Schwab trade confirmations, closing summaries, weekly summaries, and equity ratings
-  const query = `from:schwab.com after:${sinceDate} (subject:(trade OR confirmation OR executed OR order) OR subject:"closing summary" OR subject:"weekly summary" OR subject:"equity ratings")`;
+  // Search Gmail for Schwab emails. From: must include mail.schwab.com (the actual sender).
+  // Schwab sends from donotreply@mail.schwab.com, NOT @schwab.com — use mail.schwab.com to match the subdomain.
+  const query = `from:mail.schwab.com after:${sinceDate} (subject:trade OR subject:executed OR subject:confirmation OR subject:"closing summary" OR subject:"weekly summary" OR subject:"equity ratings")`;
+  console.log("Schwab Gmail query:", query);
   const listUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=50`;
   
   try {
     const listRes = await fetch(listUrl, {headers: {"Authorization": `Bearer ${token}`}});
     const listData = await listRes.json();
     const messages = listData.messages || [];
-    if (messages.length === 0) return;
+    
+    // Track last poll for UI visibility
+    S.lastEmailPoll = {
+      time: new Date().toISOString(),
+      query: query,
+      foundCount: messages.length,
+      sinceDate: sinceDate
+    };
+    sv("lastEmailPoll", S.lastEmailPoll);
+    
+    if (messages.length === 0) {
+      console.log(`Schwab email poll: 0 messages matched query "${query}"`);
+      return;
+    }
+    
+    console.log(`Schwab email poll: ${messages.length} messages matched. Processing...`);
     
     // Get already-processed message IDs to avoid duplicates
     const processedIds = new Set(S.schwabEmailUpdates.map(u => u.messageId));
     const newMessages = messages.filter(m => !processedIds.has(m.id));
-    if (newMessages.length === 0) return;
+    if (newMessages.length === 0) {
+      console.log("All matched messages already processed. Nothing new.");
+      return;
+    }
     
     const updates = [];
     for (const m of newMessages.slice(0, 20)) {  // Cap at 20 per refresh
@@ -1302,6 +1332,7 @@ async function init(){
   S.closingPrices = ld("closingPrices",{});
   S.schwabRatings = ld("schwabRatings", {});
   S.schwabWeeklySnapshots = ld("schwabWeeklySnapshots", []);
+  S.lastEmailPoll = ld("lastEmailPoll", null);
   S.prices        = ld("prices",{});
   S.pricesUpdated = ld("pricesUpdated",null);
   S.patterns      = ld("patterns",null);
@@ -3077,7 +3108,15 @@ function renderStats(){
   const svc = document.getElementById("sv-c");
   if (svc) { svc.textContent = c; svc.className = "sv" + (c > 0 ? " danger" : ""); }
   if (lv) lv.textContent = l;
-  if (tv) tv.textContent = S.trades.length;
+  if (tv) {
+    // Show CSV trades + email-detected trades since import
+    const emailTradeCount = (S.schwabEmailUpdates || []).filter(u => u.action).length;
+    if (emailTradeCount > 0) {
+      tv.innerHTML = `${S.trades.length}<span style="font-size:11px;color:var(--green2);font-weight:700;margin-left:4px">+${emailTradeCount}</span>`;
+    } else {
+      tv.textContent = S.trades.length;
+    }
+  }
 }
 
 
@@ -4065,6 +4104,7 @@ function renderHoldings() {
     ${(S.schwabWeeklySnapshots || []).length > 0 ? '✅' : '⏳'} <b>Weekly summary emails</b> — ${(S.schwabWeeklySnapshots || []).length} weeks captured (optional — daily already covers this)<br>
     ${Object.keys(S.schwabRatings || {}).length > 0 ? '✅' : '⏳'} <b>Equity ratings emails</b> — ${Object.keys(S.schwabRatings || {}).length} tickers${lastRatingDate ? ` · ${fmt(lastRatingDate)}` : ''}<br>
     ${isGmailConnected() ? '✅' : '❌'} <b>Gmail connection</b> — ${isGmailConnected() ? 'connected, polling on Refresh' : 'not connected. Settings → Connect Gmail.'}
+    ${S.lastEmailPoll ? `<div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.08);font-size:10px;color:var(--muted);line-height:1.6">Last email poll: ${new Date(S.lastEmailPoll.time).toLocaleString()} · ${S.lastEmailPoll.foundCount} messages matched · since ${S.lastEmailPoll.sinceDate}</div>` : ''}
   </div>`;
   
   wrap.innerHTML = html;
@@ -5177,7 +5217,7 @@ function renderOptimizer(wrap, d) {
 }
 
 // ── BOOT ───────────────────────────────────────────────────────────
-const APP_VERSION = "2.4-closing-visible-2026-04-25";
+const APP_VERSION = "2.5-gmail-fix-2026-04-25";
 
 window.addEventListener("load",()=>{
   console.log("Morris Trader", APP_VERSION);
