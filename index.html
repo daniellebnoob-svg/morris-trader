@@ -609,8 +609,22 @@ async function readSchwabEmails() {
       const dateHeader = headers.find(h => h.name === "Date")?.value;
       const msgDate = dateHeader ? new Date(dateHeader).toISOString().split("T")[0] : "";
       
-      // Strip HTML and limit to 3000 chars for AI parsing
-      const cleanText = bodyText.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 8000);
+      // Strip HTML and limit text size for AI parsing
+      // For closing summaries, isolate just the Equities table (huge emails otherwise truncate the data)
+      let cleanText;
+      if (/closing summary/i.test(subject)) {
+        // Extract just the price table section between "Equities" and "Cash & Money Market"/"Schwab Market Insights"/"U.S. Indices"
+        const tableMatch = bodyText.match(/Equities\s*(?:&|&amp;)\s*Mutual\s+Funds([\s\S]*?)(?:Cash\s*(?:&|&amp;)\s*Money\s+Market|Schwab Market Insights|U\.S\.\s+Indices)/i);
+        if (tableMatch) {
+          cleanText = tableMatch[1].replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/\s+/g, " ").slice(0, 12000);
+        } else {
+          // Fallback: standard cleanup with bigger budget
+          cleanText = bodyText.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/\s+/g, " ").slice(0, 12000);
+        }
+      } else {
+        // Trade execution / weekly summary / equity ratings — smaller, simpler emails
+        cleanText = bodyText.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/\s+/g, " ").slice(0, 8000);
+      }
       
       if (cleanText.length < 50) continue;
       
@@ -780,22 +794,63 @@ Rules:
       }
       
       if (isClosingSummary) {
-        // Parse closing prices — this is a daily market recap email
+        // Parse closing prices — DETERMINISTIC regex first (anchors on Schwab's ticker list comment),
+        // AI fallback if regex extracts < 5 (suggests email format changed).
         try {
-          const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "x-api-key": S.cfg.apiKey,
-              "anthropic-version": "2023-06-01",
-              "anthropic-dangerous-direct-browser-access": "true"
-            },
-            body: JSON.stringify({
-              model: "claude-opus-4-7",
-              max_tokens: 4000,
-              system: "You extract closing price data from Schwab 'My Closing Summary' daily market recap emails. Return ONLY valid JSON with no markdown.",
-              messages: [{role: "user", content: 
-                `Extract closing prices from this Schwab daily summary email. The email has a table with columns: Symbol, Security, Close, Change, Daily High, Daily Low, Volume, Percent Change.
+          let prices = {};
+          let closeDate = null;
+          let extractionMethod = "regex";
+          
+          // Step 1: Find the explicit ticker list Schwab embeds in HTML comments: "equity--AAPL, equity--ADBE, ..."
+          const tickerListMatch = bodyText.match(/equity--(\w+(?:,\s*equity--\w+)+)/);
+          const expectedTickers = tickerListMatch ? Array.from(new Set(tickerListMatch[0].match(/equity--(\w+)/g).map(s => s.replace("equity--","")))) : [];
+          
+          // Step 2: Extract date — "Apr 28, 2026" pattern
+          const dateMatch = bodyText.match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s+(\d{1,2}),?\s+(\d{4})/i);
+          if (dateMatch) {
+            const monthIdx = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"].indexOf(dateMatch[1].toLowerCase().slice(0,3));
+            const monthStr = String(monthIdx + 1).padStart(2, "0");
+            const dayStr = String(dateMatch[2]).padStart(2, "0");
+            closeDate = `${dateMatch[3]}-${monthStr}-${dayStr}`;
+          }
+          if (!closeDate) closeDate = msgDate;
+          
+          // Step 3: For each known ticker, regex out its row in the cleaned section
+          if (expectedTickers.length > 0 && cleanText) {
+            for (const ticker of expectedTickers) {
+              const escTicker = ticker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+              // Match: TICKER NAME (caps/spaces) CLOSE +/-CHG HIGH LOW
+              const rowRe = new RegExp(`\\b${escTicker}\\b\\s+[A-Z][A-Z0-9 .\\-/&']+?\\s+(\\d{1,5}\\.\\d{2})\\s+[+\\-]?\\d+\\.\\d{2}\\s+\\d{1,5}\\.\\d{2}\\s+\\d{1,5}\\.\\d{2}`);
+              const rowMatch = cleanText.match(rowRe);
+              if (rowMatch) {
+                const closePrice = Number(rowMatch[1]);
+                if (isFinite(closePrice) && closePrice > 0) {
+                  prices[ticker] = closePrice;
+                }
+              }
+            }
+          }
+          
+          console.log(`Closing summary regex: ${Object.keys(prices).length}/${expectedTickers.length} tickers extracted from ${closeDate}`);
+          
+          // Step 4: AI fallback if regex caught fewer than 5 (suggests format changed or no ticker list)
+          if (Object.keys(prices).length < 5) {
+            console.log("Regex extracted too few — falling back to AI parser");
+            extractionMethod = "ai-fallback";
+            const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "x-api-key": S.cfg.apiKey,
+                "anthropic-version": "2023-06-01",
+                "anthropic-dangerous-direct-browser-access": "true"
+              },
+              body: JSON.stringify({
+                model: "claude-opus-4-7",
+                max_tokens: 4000,
+                system: "You extract closing price data from Schwab 'My Closing Summary' daily market recap emails. Return ONLY valid JSON with no markdown.",
+                messages: [{role: "user", content: 
+                  `Extract closing prices from this Schwab daily summary email. The email has a table with columns: Symbol, Security, Close, Change, Daily High, Daily Low, Volume, Percent Change.
 
 Email subject: "${subject}"
 Email date header: ${msgDate}
@@ -810,25 +865,31 @@ Rules:
 - prices: map each ticker to its closing price (the "Close" column, as a number)
 - Extract ALL tickers in the table. This is authoritative closing-price data from Schwab.
 - Only include Equities & Mutual Funds. Skip indices (Dow Jones, NASDAQ, etc).`
-              }]
-            })
-          });
-          const aiData = await aiRes.json();
-          const text = aiData.content?.[0]?.text || "{}";
-          const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+                }]
+              })
+            });
+            const aiData = await aiRes.json();
+            const text = aiData.content?.[0]?.text || "{}";
+            const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+            if (parsed.prices && typeof parsed.prices === "object") {
+              for (const [t, p] of Object.entries(parsed.prices)) {
+                const n = Number(p);
+                if (isFinite(n) && n > 0) prices[t.toUpperCase()] = n;
+              }
+              if (parsed.date) closeDate = parsed.date;
+            }
+          }
           
-          if (parsed.prices && typeof parsed.prices === "object") {
-            const closeDate = parsed.date || msgDate;
+          // Step 5: Save what we got
+          if (Object.keys(prices).length > 0) {
             const closing = S.closingPrices || {};
             let priceCount = 0;
-            for (const [ticker, close] of Object.entries(parsed.prices)) {
-              const closeNum = Number(close);
-              if (!isFinite(closeNum) || closeNum <= 0) continue;
-              const existing = closing[ticker.toUpperCase()];
-              // Only overwrite if this email is newer than what we already have
+            for (const [ticker, close] of Object.entries(prices)) {
+              const existing = closing[ticker];
+              // Only overwrite if this email's date is newer or equal
               if (existing && existing.date && existing.date > closeDate) continue;
-              closing[ticker.toUpperCase()] = {
-                price: closeNum,
+              closing[ticker] = {
+                price: close,
                 date: closeDate,
                 source: "schwab-closing-email",
                 updated: new Date().toISOString()
@@ -837,20 +898,38 @@ Rules:
             }
             S.closingPrices = closing;
             sv("closingPrices", closing);
-            // Track this message as processed (use "closing-" prefix to distinguish)
+            
+            // Track gap (expected vs captured) so the UI can warn if missing
+            const gap = expectedTickers.length > 0 ? (expectedTickers.length - Object.keys(prices).length) : 0;
+            const missing = expectedTickers.filter(t => !prices[t]);
+            
             updates.push({
               messageId: m.id,
               type: "closing-summary",
               date: closeDate,
               priceCount: priceCount,
+              expectedCount: expectedTickers.length,
+              missingTickers: missing,
+              method: extractionMethod,
               parsedAt: new Date().toISOString()
             });
-            console.log(`Parsed ${priceCount} closing prices from Schwab summary (${closeDate})`);
+            console.log(`Closing summary ${closeDate}: ${priceCount} prices captured (${gap > 0 ? gap + ' missing: ' + missing.join(', ') : 'all ' + expectedTickers.length + ' captured'}) via ${extractionMethod}`);
+          } else {
+            console.warn(`Closing summary ${closeDate}: 0 prices extracted — neither regex nor AI worked`);
           }
         } catch (err) {
           console.warn(`Closing summary parse failed for ${m.id}:`, err.message || err);
         }
-        continue;  // Don't fall through to trade parser
+        continue;
+      }
+      
+      // PRE-FILTER: Only send to trade parser if subject explicitly indicates a trade execution
+      // This avoids dividends, ADR fees, foreign tax, margin interest emails which match
+      // "from:mail.schwab.com" but contain no trade data and would be AI-parsed as undefined
+      const isTradeEmail = /trade was executed|order (executed|filled)|trade confirmation/i.test(subject);
+      if (!isTradeEmail) {
+        console.log(`Skipping non-trade Schwab email: "${subject}"`);
+        continue;
       }
       
       // Ask Claude to extract trade details (default path — trade execution email)
@@ -1340,6 +1419,18 @@ async function init(){
   S.schwabRealized    = ld("schwabRealized", null);
   S.schwabPositions   = ld("schwabPositions", null);
   S.schwabEmailUpdates = ld("schwabEmailUpdates", []);
+  // ONE-TIME CLEANUP: remove any entries with missing core fields (from older buggy parser runs)
+  const beforeCount = S.schwabEmailUpdates.length;
+  S.schwabEmailUpdates = S.schwabEmailUpdates.filter(u => {
+    // Keep summary-type entries (closing-summary, equity-ratings) — they don't have action/ticker
+    if (u.type === "closing-summary" || u.type === "equity-ratings") return true;
+    // For trade entries: require all core fields
+    return u.action && u.ticker && u.shares && u.price;
+  });
+  if (beforeCount !== S.schwabEmailUpdates.length) {
+    console.log(`Purged ${beforeCount - S.schwabEmailUpdates.length} malformed email entries from localStorage`);
+    sv("schwabEmailUpdates", S.schwabEmailUpdates);
+  }
   S.earnings      = ld("earnings",[]);
   S.earningsDate  = ld("earningsDate",null);
 
@@ -4044,13 +4135,20 @@ function renderHoldings() {
       <div style="font-size:10px;color:var(--muted);padding-top:6px;border-top:1px solid rgba(255,255,255,.06)">Live: $${live.toFixed(2)} · Cost basis: $${cost.toFixed(0).toLocaleString()}${(function(){
         const cp = S.closingPrices?.[t];
         if (cp && cp.price && cp.date) return ` · Schwab close ${fmt(cp.date)}: $${cp.price.toFixed(2)}`;
+        // No Schwab close — only warn if we've captured at least one summary (so we know the parser is working)
+        const haveAnySummary = Object.keys(S.closingPrices || {}).length > 0;
+        if (haveAnySummary) return ` · <span style="color:var(--warn2)">⚠ no Schwab close on file</span>`;
         return '';
       })()}</div>
     </div>`;
   }
   
-  // If there are email updates, show them
-  const recentEmails = (S.schwabEmailUpdates || []).filter(u => importedAt && u.date >= importedAt.split("T")[0]);
+  // If there are email updates, show them — filter out malformed entries
+  const recentEmails = (S.schwabEmailUpdates || []).filter(u => 
+    importedAt && 
+    u.date >= importedAt.split("T")[0] &&
+    u.action && u.ticker && u.shares && u.price
+  );
   if (recentEmails.length > 0) {
     html += `<div class="sec-lbl" style="margin-top:16px">📧 Trades Detected From Emails (since CSV)</div>`;
     for (const u of recentEmails.slice().reverse()) {
@@ -4100,7 +4198,19 @@ function renderHoldings() {
     ${importedAt ? '✅' : '❌'} <b>Schwab Positions CSV</b> — ${importedAt ? `imported ${importStr}` : 'not imported. Settings → Schwab Import.'}<br>
     ${S.schwabRealized?.importedAt ? '✅' : '❌'} <b>Schwab Realized G/L Details CSV</b> — ${S.schwabRealized?.importedAt ? `imported ${new Date(S.schwabRealized.importedAt).toLocaleDateString()}` : 'not imported.'}<br>
     ${(S.schwabEmailUpdates || []).filter(u => u.action).length > 0 ? '✅' : '⏳'} <b>Trade execution emails</b> — ${(S.schwabEmailUpdates || []).filter(u => u.action).length} captured<br>
-    ${Object.keys(S.closingPrices || {}).length > 0 ? '✅' : '⏳'} <b>Daily Closing Summary emails</b> — ${Object.keys(S.closingPrices || {}).length} prices${lastClosingDate ? ` · most recent: ${fmt(lastClosingDate)}` : ''}<br>
+    ${Object.keys(S.closingPrices || {}).length > 0 ? '✅' : '⏳'} <b>Daily Closing Summary emails</b> — ${Object.keys(S.closingPrices || {}).length} prices${lastClosingDate ? ` · most recent: ${fmt(lastClosingDate)}` : ''}${(function(){
+      // Show warning if most recent closing summary had missing rows
+      const summaries = (S.schwabEmailUpdates || []).filter(u => u.type === "closing-summary");
+      if (summaries.length === 0) return '';
+      summaries.sort((a,b) => (b.date || '').localeCompare(a.date || ''));
+      const latest = summaries[0];
+      if (latest.expectedCount && latest.priceCount < latest.expectedCount) {
+        const gap = latest.expectedCount - latest.priceCount;
+        const missing = (latest.missingTickers || []).slice(0, 8).join(', ');
+        return `<div style="font-size:10px;color:var(--warn2);margin-top:3px;margin-left:18px">⚠️ ${gap} ticker${gap>1?'s':''} missing from latest summary: ${missing}${latest.missingTickers && latest.missingTickers.length > 8 ? '...' : ''}</div>`;
+      }
+      return '';
+    })()}<br>
     ${(S.schwabWeeklySnapshots || []).length > 0 ? '✅' : '⏳'} <b>Weekly summary emails</b> — ${(S.schwabWeeklySnapshots || []).length} weeks captured (optional — daily already covers this)<br>
     ${Object.keys(S.schwabRatings || {}).length > 0 ? '✅' : '⏳'} <b>Equity ratings emails</b> — ${Object.keys(S.schwabRatings || {}).length} tickers${lastRatingDate ? ` · ${fmt(lastRatingDate)}` : ''}<br>
     ${isGmailConnected() ? '✅' : '❌'} <b>Gmail connection</b> — ${isGmailConnected() ? 'connected, polling on Refresh' : 'not connected. Settings → Connect Gmail.'}
@@ -5217,7 +5327,7 @@ function renderOptimizer(wrap, d) {
 }
 
 // ── BOOT ───────────────────────────────────────────────────────────
-const APP_VERSION = "2.5-gmail-fix-2026-04-25";
+const APP_VERSION = "2.9-regex-extract-2026-04-30";
 
 window.addEventListener("load",()=>{
   console.log("Morris Trader", APP_VERSION);
