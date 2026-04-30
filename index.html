@@ -32,7 +32,8 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
 .hdate{font-size:11px;color:var(--muted);margin-top:3px}
 .hbtn{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:8px 13px;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;font-family:"DM Sans",sans-serif}
 .stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
-.stat{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:9px 11px;text-align:center}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:9px 11px;text-align:center;transition:transform .15s ease,border-color .15s ease}
+.stat:hover{transform:translateY(-1px);border-color:rgba(212,160,23,.4)}
 .stat.danger{border-color:rgba(220,38,38,.5);background:rgba(220,38,38,.1)}
 .stat.warn{border-color:rgba(217,119,6,.5);background:rgba(217,119,6,.1)}
 .stat.good{border-color:rgba(5,150,105,.5);background:rgba(5,150,105,.1)}
@@ -189,9 +190,21 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
       </div>
     </div>
     <div class="stats">
-      <div class="stat" id="st-c"><div class="sv" id="sv-c">0</div><div class="sl">Conflicts</div></div>
-      <div class="stat warn" id="st-l"><div class="sv warn" id="sv-l">11</div><div class="sl">Lockouts</div></div>
-      <div class="stat good" id="st-t"><div class="sv good" id="sv-t">981</div><div class="sl">Trades</div></div>
+      <div class="stat" id="st-c" onclick="sw('dash');setTimeout(()=>{const el=document.querySelector('.alert');if(el)el.scrollIntoView({behavior:'smooth',block:'start'});},100)" style="cursor:pointer" title="Wash sale conflicts from your Realized G/L CSV. Past closed trades that were rebought within 30 days. Tap to view list.">
+        <div class="sv" id="sv-c">0</div>
+        <div class="sl">Conflicts</div>
+        <div style="font-size:8px;color:var(--muted);margin-top:2px;letter-spacing:.05em">FROM REALIZED CSV</div>
+      </div>
+      <div class="stat warn" id="st-l" onclick="sw('taxes')" style="cursor:pointer" title="Tickers you currently can't sell at a loss without triggering a wash sale. Forward-looking. Tap to view tax tab with harvest opportunities.">
+        <div class="sv warn" id="sv-l">11</div>
+        <div class="sl">Lockouts</div>
+        <div style="font-size:8px;color:var(--muted);margin-top:2px;letter-spacing:.05em">CAN'T SELL AT LOSS</div>
+      </div>
+      <div class="stat good" id="st-t" onclick="sw('holdings')" style="cursor:pointer" title="Trades from your historical Transactions CSV plus any new trades captured from Schwab emails. Tap to view holdings.">
+        <div class="sv good" id="sv-t">981</div>
+        <div class="sl">Trades</div>
+        <div style="font-size:8px;color:var(--muted);margin-top:2px;letter-spacing:.05em">CSV + EMAIL</div>
+      </div>
     </div>
   </div>
 
@@ -235,7 +248,13 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
           <div style="font-family:'Playfair Display',serif;font-size:22px;font-weight:800;color:var(--gold2)">📋 Your Holdings</div>
           <div id="holdings-subtitle" style="font-size:11px;color:var(--muted);margin-top:2px">Source of truth — Schwab CSV + email updates</div>
         </div>
-        <button onclick="sw('dash')" style="padding:7px 12px;background:rgba(26,79,214,.2);border:1px solid rgba(147,197,253,.3);color:#93c5fd;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif">← Back</button>
+        <div style="display:flex;gap:6px;align-items:center">
+          <div style="display:flex;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:8px;padding:2px;font-family:'DM Sans',sans-serif">
+            <button id="hs-value" onclick="setHoldingsSort('value')" style="padding:5px 10px;background:rgba(212,160,23,.18);border:none;color:var(--gold2);border-radius:6px;font-size:11px;font-weight:700;cursor:pointer">$ Value</button>
+            <button id="hs-alpha" onclick="setHoldingsSort('alpha')" style="padding:5px 10px;background:transparent;border:none;color:var(--muted);border-radius:6px;font-size:11px;font-weight:700;cursor:pointer">A→Z</button>
+          </div>
+          <button onclick="sw('dash')" style="padding:7px 12px;background:rgba(26,79,214,.2);border:1px solid rgba(147,197,253,.3);color:#93c5fd;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif">← Back</button>
+        </div>
       </div>
       <div id="holdings-wrap"></div>
     </div>
@@ -1412,6 +1431,7 @@ async function init(){
   S.schwabRatings = ld("schwabRatings", {});
   S.schwabWeeklySnapshots = ld("schwabWeeklySnapshots", []);
   S.lastEmailPoll = ld("lastEmailPoll", null);
+  S.holdingsSort = ld("holdingsSort", "value");
   S.prices        = ld("prices",{});
   S.pricesUpdated = ld("pricesUpdated",null);
   S.patterns      = ld("patterns",null);
@@ -4045,7 +4065,28 @@ function sw(tab){
 }
 
 // Holdings tab: the "source of truth" view showing what the app thinks you own
+function setHoldingsSort(mode) {
+  S.holdingsSort = mode;
+  sv("holdingsSort", mode);
+  // Update button styles
+  const valBtn = document.getElementById("hs-value");
+  const alphaBtn = document.getElementById("hs-alpha");
+  const activeStyle = "padding:5px 10px;background:rgba(212,160,23,.18);border:none;color:var(--gold2);border-radius:6px;font-size:11px;font-weight:700;cursor:pointer";
+  const inactiveStyle = "padding:5px 10px;background:transparent;border:none;color:var(--muted);border-radius:6px;font-size:11px;font-weight:700;cursor:pointer";
+  if (valBtn) valBtn.style.cssText = mode === "value" ? activeStyle : inactiveStyle;
+  if (alphaBtn) alphaBtn.style.cssText = mode === "alpha" ? activeStyle : inactiveStyle;
+  renderHoldings();
+}
+
 function renderHoldings() {
+  // Apply sort preference to toggle buttons (in case page reloaded)
+  const sortPref = S.holdingsSort || "value";
+  const valBtn = document.getElementById("hs-value");
+  const alphaBtn = document.getElementById("hs-alpha");
+  const activeStyle = "padding:5px 10px;background:rgba(212,160,23,.18);border:none;color:var(--gold2);border-radius:6px;font-size:11px;font-weight:700;cursor:pointer";
+  const inactiveStyle = "padding:5px 10px;background:transparent;border:none;color:var(--muted);border-radius:6px;font-size:11px;font-weight:700;cursor:pointer";
+  if (valBtn) valBtn.style.cssText = sortPref === "value" ? activeStyle : inactiveStyle;
+  if (alphaBtn) alphaBtn.style.cssText = sortPref === "alpha" ? activeStyle : inactiveStyle;
   const wrap = document.getElementById("holdings-wrap");
   const sub = document.getElementById("holdings-subtitle");
   if (!wrap) return;
@@ -4086,12 +4127,16 @@ function renderHoldings() {
   
   html += `<div class="sec-lbl">All Positions (${tickers.length})</div>`;
   
-  // Sort by market value descending
-  tickers.sort((a,b) => {
-    const liveA = S.prices?.[a]?.current || adjusted[a].currentPrice || adjusted[a].avg;
-    const liveB = S.prices?.[b]?.current || adjusted[b].currentPrice || adjusted[b].avg;
-    return (adjusted[b].shares * liveB) - (adjusted[a].shares * liveA);
-  });
+  // Sort based on user preference (sortPref already defined above for button styling)
+  if (sortPref === "alpha") {
+    tickers.sort((a, b) => a.localeCompare(b));
+  } else {
+    tickers.sort((a,b) => {
+      const liveA = S.prices?.[a]?.current || adjusted[a].currentPrice || adjusted[a].avg;
+      const liveB = S.prices?.[b]?.current || adjusted[b].currentPrice || adjusted[b].avg;
+      return (adjusted[b].shares * liveB) - (adjusted[a].shares * liveA);
+    });
+  }
   
   for (const t of tickers) {
     const p = adjusted[t];
@@ -5327,7 +5372,7 @@ function renderOptimizer(wrap, d) {
 }
 
 // ── BOOT ───────────────────────────────────────────────────────────
-const APP_VERSION = "2.9-regex-extract-2026-04-30";
+const APP_VERSION = "3.0-clickable-stats-2026-04-30";
 
 window.addEventListener("load",()=>{
   console.log("Morris Trader", APP_VERSION);
