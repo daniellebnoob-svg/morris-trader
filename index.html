@@ -200,10 +200,10 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
         <div class="sl">Lockouts</div>
         <div style="font-size:8px;color:var(--muted);margin-top:2px;letter-spacing:.05em">CAN'T SELL AT LOSS</div>
       </div>
-      <div class="stat good" id="st-t" onclick="sw('holdings')" style="cursor:pointer" title="Trades from your historical Transactions CSV plus any new trades captured from Schwab emails. Tap to view holdings.">
-        <div class="sv good" id="sv-t">981</div>
-        <div class="sl">Trades</div>
-        <div style="font-size:8px;color:var(--muted);margin-top:2px;letter-spacing:.05em">CSV + EMAIL</div>
+      <div class="stat good" id="st-t" onclick="sw('holdings')" style="cursor:pointer" title="New trades captured from Schwab emails since your last Realized G/L CSV import. Tap to view holdings. The smaller 'hist' number is your historical trade count from the original Transactions CSV import (fixed reference, not actionable).">
+        <div class="sv good" id="sv-t">0</div>
+        <div class="sl">New Trades</div>
+        <div style="font-size:8px;color:var(--muted);margin-top:2px;letter-spacing:.05em">SINCE LAST CSV</div>
       </div>
     </div>
   </div>
@@ -454,7 +454,7 @@ body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellips
         </div>
         <input type="file" id="import-file" accept=".json" style="display:none" onchange="importTrades(event)">
         <div id="import-status" style="font-size:12px;color:var(--green2);margin-top:8px;display:none"></div>
-        <div id="cfg-ok" style="display:none;text-align:center;color:var(--green2);margin-top:9px;font-weight:700;font-size:14px">✓ Saved</div>
+        <div id="trade-data-ok" style="display:none;text-align:center;color:var(--green2);margin-top:9px;font-weight:700;font-size:14px">✓ Saved</div>
       </div>
       <div class="cfg-card" style="margin-top:0">
         <div class="cfg-title">Gmail Connection</div>
@@ -499,8 +499,22 @@ function connectGmail() {
     `&redirect_uri=${encodeURIComponent(window.location.origin + window.location.pathname)}` +
     `&response_type=token` +
     `&scope=${encodeURIComponent(GMAIL_SCOPES)}` +
-    `&prompt=consent`;
+    `&prompt=select_account` +
+    `&include_granted_scopes=true`;
   window.location.href = authUrl;
+}
+
+// Returns the time until the token expires, in human-readable form
+function getGmailTokenStatus() {
+  const token = ld('gmail_token', null);
+  const expiry = ld('gmail_expiry', 0);
+  if (!token) return { connected: false, expiringMessage: null };
+  const msLeft = expiry - Date.now();
+  if (msLeft <= 0) return { connected: false, expiringMessage: "expired — reconnect needed" };
+  const minLeft = Math.floor(msLeft / 60000);
+  if (minLeft < 5) return { connected: true, expiringMessage: `expires in ${minLeft}m — reconnect soon` };
+  if (minLeft < 60) return { connected: true, expiringMessage: `expires in ${minLeft}m` };
+  return { connected: true, expiringMessage: `connected` };
 }
 
 function checkGmailCallback() {
@@ -548,7 +562,13 @@ function isGmailConnected() {
 
 async function readSchwabEmails() {
   const token = getGmailToken();
-  if (!token) return;
+  if (!token) {
+    // Was Gmail previously connected? If so, the token expired
+    if (ld('gmail_token', null)) {
+      S.gmailExpiredFlag = true;  // refreshAll will check this and offer reconnect
+    }
+    return;
+  }
   if (!S.cfg.apiKey) return;
   
   // Look back at least 14 days, OR since the LAST email-update poll (whichever is older)
@@ -1407,7 +1427,9 @@ function doSetup(){
     if(!confirm("API key should start with sk-ant-. Continue anyway?")) return;
   }
   
-  const cfg = {apiKey, email1: email1 || "morrisgabbay@gmail.com", email2};
+  // CRITICAL: spread existing cfg first so Gmail token, finnhubKey, taxBracket survive re-setup
+  const existing = ld("cfg", {});
+  const cfg = {...existing, apiKey, email1: email1 || "morrisgabbay@gmail.com", email2};
   sv("cfg", cfg);
   S.cfg = cfg;
   console.log("Setup saved, launching app...");
@@ -1457,8 +1479,24 @@ async function init(){
   // Seed trades if first run
   if(S.trades.length===0){ S.trades=SEED_TRADES; sv("trades",S.trades); }
 
-  // Load lockouts — merge seed with computed
-  S.lockouts = Object.assign({}, SEED_LOCKOUTS, ld("lockouts",{}));
+  // Load lockouts — merge seed with computed, strip any whose safe-after date has passed
+  const today_ISO_init = new Date().toISOString().split("T")[0];
+  const merged_lockouts = Object.assign({}, SEED_LOCKOUTS, ld("lockouts",{}));
+  S.lockouts = {};
+  for (const [t, safeDate] of Object.entries(merged_lockouts)) {
+    if (safeDate && safeDate >= today_ISO_init) S.lockouts[t] = safeDate;
+  }
+  
+  // Prune dismissed-conflict keys for conflicts that no longer exist (avoids LS bloat)
+  const dismissedNow = ld("dismissedConflicts", []);
+  if (dismissedNow.length > 0 && S.conflicts && S.conflicts.length > 0) {
+    const validKeys = new Set(S.conflicts.map(c => c.ticker + "_" + c.sellDate + "_" + c.buyDate));
+    const cleaned = dismissedNow.filter(k => validKeys.has(k));
+    if (cleaned.length !== dismissedNow.length) {
+      sv("dismissedConflicts", cleaned);
+      console.log(`Pruned ${dismissedNow.length - cleaned.length} stale dismissed-conflict keys`);
+    }
+  }
 
   document.getElementById("hdate").textContent = new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"});
   document.getElementById("f-d").value = tod();
@@ -1468,12 +1506,18 @@ async function init(){
   if(S.cfg.finnhubKey) document.getElementById("cfg-finnhub").value=S.cfg.finnhubKey;
   if(S.cfg.email1) document.getElementById("cfg-e1").value=S.cfg.email1;
   if(S.cfg.email2) document.getElementById("cfg-e2").value=S.cfg.email2;
-  if(S.cfg.bracket) document.getElementById("cfg-bracket").value=S.cfg.bracket;
-  if(S.cfg.ltcg !== undefined) document.getElementById("cfg-ltcg").value=S.cfg.ltcg;
+  // ONE-TIME MIGRATION: legacy `bracket` -> canonical `taxBracket`, `ltcg` -> `ltRate`
+  if (S.cfg.bracket !== undefined && S.cfg.taxBracket === undefined) S.cfg.taxBracket = S.cfg.bracket;
+  if (S.cfg.ltcg !== undefined && S.cfg.ltRate === undefined) S.cfg.ltRate = S.cfg.ltcg;
+  if (S.cfg.bracket !== undefined) delete S.cfg.bracket;
+  if (S.cfg.ltcg !== undefined) delete S.cfg.ltcg;
+  // Defaults on canonical keys
+  if (S.cfg.taxBracket === undefined || isNaN(S.cfg.taxBracket)) S.cfg.taxBracket = 37;
+  if (S.cfg.ltRate === undefined || isNaN(S.cfg.ltRate)) S.cfg.ltRate = 20;
+  sv("cfg", S.cfg);
+  if(S.cfg.taxBracket) document.getElementById("cfg-bracket").value=S.cfg.taxBracket;
+  if(S.cfg.ltRate !== undefined) document.getElementById("cfg-ltcg").value=S.cfg.ltRate;
   if(S.cfg.state) document.getElementById("cfg-state").value=S.cfg.state;
-  // Default tax bracket
-  if(!S.cfg.bracket) S.cfg.bracket = 37;
-  if(S.cfg.ltcg === undefined) S.cfg.ltcg = 20;
 
   computeWS();
   
@@ -1880,18 +1924,10 @@ function updatePortfolioCard() {
 }
 
 function buildPos(){
-  // PRIMARY: Use Schwab positions if imported (authoritative, wash-sale-adjusted cost basis)
+  // PRIMARY: When Schwab positions are loaded, return the email-adjusted view
+  // so home/Brief/Insights see SAME positions as Holdings tab.
   if (S.schwabPositions?.positions?.length > 0) {
-    const r = {};
-    for (const p of S.schwabPositions.positions) {
-      r[p.ticker] = {
-        shares: p.shares,
-        avg: p.costBasisPerShare,
-        costBasisTotal: p.costBasisTotal,
-        source: "schwab"
-      };
-    }
-    return r;
+    return getAdjustedPositions();
   }
   // FALLBACK: Derive from trade history (inaccurate, warns user)
   // Note: this FIFO approach double-counts when positions close and reopen
@@ -2555,7 +2591,13 @@ function renderTaxes() {
   let estRealizedST = r.ytd_short_term;
   let estRealizedLT = r.ytd_long_term;
   let estDisallowed = r.ytd_disallowed;
-  let emailUpdateCount = S.schwabEmailUpdates?.length || 0;
+  // Count ONLY actual trades (not closing summaries / equity ratings) since last Realized CSV import
+  const realizedImportDate = r.importedAt ? r.importedAt.split("T")[0] : null;
+  const emailTradesSinceImport = (S.schwabEmailUpdates || []).filter(u => 
+    u.action && u.ticker && u.shares && u.price &&
+    (!realizedImportDate || u.date > realizedImportDate)
+  );
+  let emailUpdateCount = emailTradesSinceImport.length;
   
   // Calculate tax liability
   const baseTax = computeTaxLiability(r.ytd_short_term, r.ytd_long_term);
@@ -3220,12 +3262,20 @@ function renderStats(){
   if (svc) { svc.textContent = c; svc.className = "sv" + (c > 0 ? " danger" : ""); }
   if (lv) lv.textContent = l;
   if (tv) {
-    // Show CSV trades + email-detected trades since import
-    const emailTradeCount = (S.schwabEmailUpdates || []).filter(u => u.action).length;
-    if (emailTradeCount > 0) {
-      tv.innerHTML = `${S.trades.length}<span style="font-size:11px;color:var(--green2);font-weight:700;margin-left:4px">+${emailTradeCount}</span>`;
+    // Show NEW trades since last Realized CSV import as the primary number,
+    // with historical baseline as context. Schwab CSV was imported on r.importedAt.
+    const realizedImport = S.schwabRealized?.importedAt ? S.schwabRealized.importedAt.split("T")[0] : null;
+    const newTradesSinceImport = (S.schwabEmailUpdates || []).filter(u => 
+      u.action && u.ticker && u.shares && u.price &&
+      (!realizedImport || u.date > realizedImport)
+    ).length;
+    
+    if (newTradesSinceImport > 0) {
+      // Show NEW trades prominently in green, historical in muted small text
+      tv.innerHTML = `<span style="color:var(--green2)">+${newTradesSinceImport}</span><div style="font-size:9px;color:var(--muted);font-weight:600;margin-top:1px">${S.trades.length} hist</div>`;
     } else {
-      tv.textContent = S.trades.length;
+      // No new trades since import — just show historical
+      tv.innerHTML = `<span style="opacity:.6">0</span><div style="font-size:9px;color:var(--muted);font-weight:600;margin-top:1px">${S.trades.length} hist</div>`;
     }
   }
 }
@@ -3402,6 +3452,28 @@ function renderDash(){
   if (noDataEl) noDataEl.style.display=noData?"block":"none";
 }
 
+// Module-scope helper — used by Brief, Insights renderers, etc.
+// Returns {locked: bool, safeAfter: "YYYY-MM-DD" or undefined}
+function isTickerWashSaleLocked(ticker) {
+  const today = tod();
+  // S.lockouts (from Schwab Realized CSV + computed)
+  const safeDate = S.lockouts && S.lockouts[ticker];
+  if (safeDate && safeDate >= today) return {locked: true, safeAfter: safeDate};
+  // Recent BUY within 30 days from historical trades
+  if (S.trades) {
+    const recentBuy = S.trades.find(t => t.ticker === ticker && t.action === "BUY" && dbet(today, t.date) <= 30);
+    if (recentBuy) return {locked: true, safeAfter: dadd(recentBuy.date, 31)};
+  }
+  // Recent BUY within 30 days from email-detected trades
+  if (S.schwabEmailUpdates) {
+    const recentEmailBuy = S.schwabEmailUpdates.find(u =>
+      u.action === "BUY" && u.ticker === ticker && u.date && dbet(today, u.date) <= 30
+    );
+    if (recentEmailBuy) return {locked: true, safeAfter: dadd(recentEmailBuy.date, 31)};
+  }
+  return {locked: false};
+}
+
 function renderBrief(){
   const el=document.getElementById("brief-wrap");
   const b=S.brief; if(!b){el.innerHTML=""; return;}
@@ -3452,22 +3524,8 @@ function renderBrief(){
   }
 
   // Filter out hallucinated SELL/HOLD recommendations (tickers not actually held)
-  // AND override AI's wash_risk claim with REAL lockout check
+  // AND override AI's wash_risk claim with REAL lockout check (module-scope isTickerWashSaleLocked)
   const today = tod();
-  function isTickerWashSaleLocked(ticker) {
-    // Check S.lockouts (from Schwab Realized CSV + recent trades)
-    const safeDate = S.lockouts && S.lockouts[ticker];
-    if (safeDate && safeDate >= today) return {locked: true, safeAfter: safeDate};
-    // Also check: any recent BUY on this ticker within 30 days from S.trades
-    if (S.trades) {
-      const recentBuy = S.trades.find(t => t.ticker === ticker && t.action === "BUY" && dbet(today, t.date) <= 30);
-      if (recentBuy) {
-        const safeAfter = dadd(recentBuy.date, 31);
-        return {locked: true, safeAfter: safeAfter};
-      }
-    }
-    return {locked: false};
-  }
   
   let trades="";
   let filteredCount = 0;
@@ -3631,9 +3689,13 @@ async function checkTradeAdvanced() {
 }
 
 async function runBacktestSimulation(ticker, shares, currentPrice) {
-  if (!S.cfg.finnhubKey) return null;
+  if (!S.cfg.finnhubKey) {
+    return { unavailable: true, reason: "no_finnhub_key" };
+  }
   const history = await fetchHistoricalPrices(ticker, 365);
-  if (!history || history.length < 30) return null;
+  if (!history || history.length < 30) {
+    return { unavailable: true, reason: "no_historical_data" };
+  }
   
   // Simulate: bought at each day in last 12 months, sold 5/10/30 days later
   const scenarios = [];
@@ -3673,6 +3735,17 @@ async function runBacktestSimulation(ticker, shares, currentPrice) {
 }
 
 function renderSimulation(sim, ticker) {
+  // Backtest unavailable (Finnhub free tier doesn't include /candle endpoint)
+  if (sim && sim.unavailable) {
+    const reason = sim.reason === "no_finnhub_key"
+      ? "Add a Finnhub API key in Settings to enable price-based features."
+      : "Backtest requires Finnhub paid tier — historical price data (/candle endpoint) isn't included in the free 60/min plan.";
+    return `<div style="background:rgba(217,119,6,.08);border:1px solid rgba(217,119,6,.25);border-radius:12px;padding:14px;margin-bottom:10px">
+      <div style="font-size:13px;font-weight:800;color:var(--warn2);margin-bottom:6px">📊 Backtest unavailable</div>
+      <div style="font-size:12px;color:rgba(255,255,255,.85);line-height:1.5">${reason}</div>
+    </div>`;
+  }
+  if (!sim || !sim.scenarios) return "";
   const invested = sim.shares * sim.currentPrice;
   let html = '<div style="background:rgba(26,79,214,.1);border:1px solid rgba(26,79,214,.25);border-radius:12px;padding:14px;margin-bottom:10px">';
   html += `<div style="font-size:13px;font-weight:800;color:#93c5fd;margin-bottom:10px">📊 What Would Have Happened — Backtest ${ticker}</div>`;
@@ -3734,8 +3807,8 @@ async function runTaxPreview(ticker, shares, sellPrice) {
       remaining -= take;
     }
     
-    const bracket = S.cfg.bracket || 37;
-    const ltcgRate = S.cfg.ltcg !== undefined ? S.cfg.ltcg : 20;
+    const bracket = S.cfg.taxBracket || 37;
+    const ltcgRate = S.cfg.ltRate !== undefined ? S.cfg.ltRate : 20;
     const stTax = stGain > 0 ? stGain * (bracket/100) : 0;
     const ltTax = ltGain > 0 ? ltGain * (ltcgRate/100) : 0;
     const totalTax = stTax + ltTax;
@@ -3787,8 +3860,8 @@ async function runTaxPreview(ticker, shares, sellPrice) {
     fifo,
     lifo,
     smart,
-    bracket: S.cfg.bracket || 37,
-    ltcg: S.cfg.ltcg !== undefined ? S.cfg.ltcg : 20
+    bracket: S.cfg.taxBracket || 37,
+    ltcg: S.cfg.ltRate !== undefined ? S.cfg.ltRate : 20
   };
 }
 
@@ -3998,6 +4071,17 @@ async function refreshAll(){
       btn.style.background = "rgba(5,150,105,.85)";
       btn.style.borderColor = "rgba(167,243,208,.5)";
     }
+    
+    // Check if Gmail token expired during this refresh; offer reconnect
+    if (S.gmailExpiredFlag) {
+      S.gmailExpiredFlag = false;
+      setTimeout(() => {
+        if (confirm("Gmail token expired (Google tokens last 1 hour). Reconnect now?")) {
+          connectGmail();
+        }
+      }, 600);
+    }
+    
     // Revert after 2 seconds
     setTimeout(() => {
       if (btn) {
@@ -4032,17 +4116,22 @@ async function refreshAll(){
 }
 
 function saveCfg(){
+  // Preserve existing cfg fields (Gmail token, etc.) — only overwrite the form fields
+  const existing = ld("cfg", {});
   S.cfg = {
+    ...existing,
     apiKey: document.getElementById("cfg-api").value.trim(),
     finnhubKey: document.getElementById("cfg-finnhub").value.trim(),
     email1: document.getElementById("cfg-e1").value.trim(),
     email2: document.getElementById("cfg-e2").value.trim(),
-    bracket: parseFloat(document.getElementById("cfg-bracket").value),
-    ltcg: parseFloat(document.getElementById("cfg-ltcg").value),
-    state: document.getElementById("cfg-state").value,
-    // Preserve existing gmail token
-    gmail: S.cfg.gmail
+    // Canonical keys — readers everywhere use these names
+    taxBracket: parseFloat(document.getElementById("cfg-bracket").value),
+    ltRate: parseFloat(document.getElementById("cfg-ltcg").value),
+    state: document.getElementById("cfg-state").value
   };
+  // Remove legacy aliases so they can't drift out of sync
+  delete S.cfg.bracket;
+  delete S.cfg.ltcg;
   sv("cfg", S.cfg);
   const ok = document.getElementById("cfg-ok");
   ok.style.display = "block";
@@ -4103,7 +4192,10 @@ function renderHoldings() {
   // Subtitle: import date + email adjustments count
   const importedAt = S.schwabPositions?.importedAt;
   const importStr = importedAt ? new Date(importedAt).toLocaleDateString("en-US", {month:"short",day:"numeric",year:"numeric"}) : "unknown";
-  const emailCount = (S.schwabEmailUpdates || []).filter(u => importedAt && u.date >= importedAt.split("T")[0]).length;
+  const emailCount = (S.schwabEmailUpdates || []).filter(u => 
+    importedAt && u.date >= importedAt.split("T")[0] &&
+    u.action && u.ticker && u.shares && u.price
+  ).length;
   sub.innerHTML = `CSV imported ${importStr} · ${emailCount} trade${emailCount!==1?'s':''} since via email`;
   
   // Compute totals
@@ -4258,7 +4350,12 @@ function renderHoldings() {
     })()}<br>
     ${(S.schwabWeeklySnapshots || []).length > 0 ? '✅' : '⏳'} <b>Weekly summary emails</b> — ${(S.schwabWeeklySnapshots || []).length} weeks captured (optional — daily already covers this)<br>
     ${Object.keys(S.schwabRatings || {}).length > 0 ? '✅' : '⏳'} <b>Equity ratings emails</b> — ${Object.keys(S.schwabRatings || {}).length} tickers${lastRatingDate ? ` · ${fmt(lastRatingDate)}` : ''}<br>
-    ${isGmailConnected() ? '✅' : '❌'} <b>Gmail connection</b> — ${isGmailConnected() ? 'connected, polling on Refresh' : 'not connected. Settings → Connect Gmail.'}
+    ${(function(){
+      const s = getGmailTokenStatus();
+      if (!s.connected) return '❌ <b>Gmail connection</b> — ' + (s.expiringMessage || 'not connected. Settings → Connect Gmail.');
+      const warn = s.expiringMessage && s.expiringMessage.includes("expires in") ? `<span style="color:var(--warn2)"> · ${s.expiringMessage}</span>` : '';
+      return `✅ <b>Gmail connection</b> — connected, polling on Refresh${warn}`;
+    })()}
     ${S.lastEmailPoll ? `<div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.08);font-size:10px;color:var(--muted);line-height:1.6">Last email poll: ${new Date(S.lastEmailPoll.time).toLocaleString()} · ${S.lastEmailPoll.foundCount} messages matched · since ${S.lastEmailPoll.sinceDate}</div>` : ''}
   </div>`;
   
@@ -4658,6 +4755,12 @@ function parseSchwabRealizedCSV(text) {
   if (idx.symbol < 0 || idx.gainLoss < 0) {
     throw new Error("CSV missing required columns (Symbol, Gain/Loss). Make sure you exported 'Export Details Only' from Schwab.");
   }
+  // CRITICAL: detect if user imported the SUMMARY CSV instead of DETAILS.
+  // Summary file has columns "Long Term (LT) Gain/Loss ($)" — our partial-match grabs that for "Term",
+  // but won't find a plain "Long Term Gain/Loss" column, so ST/LT splits would silently be $0.
+  if (idx.longTerm < 0 || idx.shortTerm < 0) {
+    throw new Error("This looks like the SUMMARY CSV, not the DETAILS CSV. In Schwab: Accounts > History > Realized Gain/Loss > Export > 'Export Details Only'. The filename should contain 'Details'.");
+  }
   
   const lots = [];
   for (let i = 2; i < lines.length; i++) {
@@ -4819,9 +4922,19 @@ async function importSchwabRealized() {
       const parsed = parseSchwabRealizedCSV(text);
       S.schwabRealized = parsed;
       sv("schwabRealized", parsed);
-      // Reset email updates since we now have fresh source of truth
-      S.schwabEmailUpdates = [];
-      sv("schwabEmailUpdates", []);
+      // Only purge email updates SUPERSEDED by the CSV.
+      // Schwab CSV through-date covers everything <= throughDate; emails dated AFTER are still our only source.
+      const throughDate = parsed.throughDate;
+      const before = S.schwabEmailUpdates.length;
+      S.schwabEmailUpdates = S.schwabEmailUpdates.filter(u => {
+        // Keep summary entries (closing prices, ratings) — not in the Realized CSV
+        if (u.type === "closing-summary" || u.type === "equity-ratings") return true;
+        // Keep trade entries dated AFTER the CSV's throughDate
+        return u.date && u.date > throughDate;
+      });
+      const purged = before - S.schwabEmailUpdates.length;
+      sv("schwabEmailUpdates", S.schwabEmailUpdates);
+      console.log(`Realized CSV import: kept ${S.schwabEmailUpdates.length} email updates after ${throughDate}, purged ${purged} now-redundant entries`);
       
       const msg = `✅ Imported Schwab Realized G/L
       
@@ -5372,7 +5485,7 @@ function renderOptimizer(wrap, d) {
 }
 
 // ── BOOT ───────────────────────────────────────────────────────────
-const APP_VERSION = "3.0-clickable-stats-2026-04-30";
+const APP_VERSION = "3.3-summary-csv-guard-2026-06-04";
 
 window.addEventListener("load",()=>{
   console.log("Morris Trader", APP_VERSION);
